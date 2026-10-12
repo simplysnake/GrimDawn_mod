@@ -4,6 +4,7 @@
 
 #include "engine_hooks.h"
 #include "log.h"
+#include "mask.h"
 #include "overlay.h"
 #include "perf.h"
 #include "xr.h"
@@ -30,13 +31,17 @@ DWORD WINAPI InitThread(LPVOID) {
 // build can be loaded into the running game.
 extern "C" __declspec(dllexport) DWORD WINAPI GDVR_Shutdown(LPVOID) {
   gdvr::Log("gdvr shutting down");
+  // The D3D11 immediate context and the OpenXR session belong to the render thread: release
+  // them there. Only if the game is not presenting (paused, minimised) do it from here.
+  if (!gdvr::overlay::RequestTeardown(3000)) {
+    gdvr::Log("game not presenting; tearing down from the unload thread");
+    gdvr::overlay::TeardownNow();
+  }
   MH_DisableHook(MH_ALL_HOOKS);
   // Wait until no thread is still executing inside one of our detours.
-  for (int i = 0; i < 200 && (gdvr::engine::InFlight() || gdvr::overlay::InFlight() || gdvr::perf::InFlight()); ++i) Sleep(10);
+  for (int i = 0; i < 200 && (gdvr::engine::InFlight() || gdvr::overlay::InFlight() || gdvr::perf::InFlight() ||
+                              gdvr::mask::InFlight()); ++i) Sleep(10);
   Sleep(50);  // also lets threads that were between the trampoline and the guard drain
-  gdvr::xr::Shutdown();
-  gdvr::perf::Shutdown();
-  gdvr::overlay::Shutdown();
   MH_Uninitialize();
   gdvr::Log("gdvr unloaded");
   return 0;

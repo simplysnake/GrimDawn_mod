@@ -56,9 +56,10 @@ add_library(gdvr SHARED
   src/gdvr/engine_hooks.cpp
   src/gdvr/overlay.cpp
   src/gdvr/log.cpp
+  src/gdvr/mask.cpp
   src/gdvr/perf.cpp
   src/gdvr/xr.cpp)
-target_link_libraries(gdvr PRIVATE minhook imgui openxr_loader d3d11 dxgi)
+target_link_libraries(gdvr PRIVATE minhook imgui openxr_loader d3d11 dxgi d3dcompiler)
 target_compile_definitions(gdvr PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 
 set(GDVR_GAME_DIR "G:/Games/Steam/steamapps/common/Grim Dawn" CACHE PATH "Grim Dawn install folder")

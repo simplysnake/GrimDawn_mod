@@ -39,7 +39,10 @@ Log: `%LOCALAPPDATA%\gdvr\gdvr.log`
 ## VR
 
 - Launch with `bin\gdvr_launch.exe` (or the Steam shortcut). It starts SteamVR first, then the game, then the mod.
-- **F9** cycles VR mode (Off → Screen → Stereo), **F10** recentres, **F8** toggles the debug window.
+- **F9** cycles VR mode (Off → Screen → Stereo), **F10** recentres, **F8** toggles the debug window,
+  **F7** cycles the fade mask (on → distance rings → off).
 - Settings: `%LOCALAPPDATA%\gdvr\control.ini`, section `[vr]`: `mode`, `world_scale`, `fov_deg` (0 = fit lenses),
-  `level_horizon`, `recompute_frustum`, `screen_distance`, `screen_width`, `recenter` (change the number to recentre).
+  `level_horizon`, `recompute_frustum`, `screen_distance`, `screen_width`, `recenter` (change the number to recentre),
+  `far_plane` (default 70), `mask`, `mask_inner`/`mask_outer` (fade distances from the player, default 45/62),
+  `mask_depth_start`, `mask_strength`, `mask_debug`, `mask_depth_pick`, `bench` (stereo while the headset sleeps).
 - The game must run windowed with vsync off: `tools\apply_vr_settings.ps1` applies recommended settings after the game exits.

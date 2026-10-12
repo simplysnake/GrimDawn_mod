@@ -384,8 +384,22 @@ void OnPresent(IDXGISwapChain* swapChain) {
     g_device->GetImmediateContext(&g_context);
   }
 
-  // Hotkeys: F9 cycles Off -> Screen -> Stereo, F10 recentres.
-  static bool f9Was = false, f10Was = false;
+  // Hotkeys: F7 cycles the mask (on -> distance rings -> off), F9 cycles Off -> Screen -> Stereo,
+  // F10 recentres.
+  static bool f7Was = false, f9Was = false, f10Was = false;
+  const bool f7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
+  if (f7 && !f7Was) {
+    if (g_settings.maskEnabled && !g_settings.maskDebug) {
+      g_settings.maskDebug = true;
+    } else if (g_settings.maskEnabled) {
+      g_settings.maskEnabled = false;
+      g_settings.maskDebug = false;
+    } else {
+      g_settings.maskEnabled = true;
+    }
+    Log("mask -> %s", !g_settings.maskEnabled ? "off" : g_settings.maskDebug ? "debug rings" : "on");
+  }
+  f7Was = f7;
   const bool f9 = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
   const bool f10 = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
   if (f9 && !f9Was) {
@@ -438,10 +452,49 @@ void EyeTanFov(int eye, float& tanHalfX, float& tanHalfY) {
   tanHalfY = std::max(std::tan(std::fabs(f.angleUp)), std::tan(std::fabs(f.angleDown)));
 }
 
+void ApplyMask(const mask::Params& p) {
+  std::lock_guard lock(g_mutex);
+  static bool warned = false;
+  if (!mask::Apply(g_gameSwapChain, p) && !warned) {
+    warned = true;
+    Log("mask: not drawn (no usable scene depth buffer found yet)");
+  }
+}
+
 void CaptureEye(int eye, float tanHalfX, float tanHalfY) {
   std::lock_guard lock(g_mutex);
   if (!g_frameBegun) return;
   eye &= 1;
+  static double lastDiag = 0;
+  if (eye == 0 && NowMs() - lastDiag > 3000.0) {
+    lastDiag = NowMs();
+    ID3D11RenderTargetView* rtvs[4] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    g_context->OMGetRenderTargets(4, rtvs, &dsv);
+    for (int i = 0; i < 4; ++i) {
+      if (!rtvs[i]) continue;
+      ID3D11Resource* r = nullptr;
+      rtvs[i]->GetResource(&r);
+      D3D11_TEXTURE2D_DESC d{};
+      static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);
+      Log("diag: RTV%d %ux%u fmt %d bind 0x%X", i, d.Width, d.Height, int(d.Format), d.BindFlags);
+      r->Release();
+      rtvs[i]->Release();
+    }
+    if (dsv) {
+      ID3D11Resource* r = nullptr;
+      dsv->GetResource(&r);
+      D3D11_TEXTURE2D_DESC d{};
+      static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);
+      D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
+      dsv->GetDesc(&vd);
+      Log("diag: DSV %ux%u tex fmt %d view fmt %d bind 0x%X", d.Width, d.Height, int(d.Format), int(vd.Format), d.BindFlags);
+      r->Release();
+      dsv->Release();
+    } else {
+      Log("diag: no DSV bound after eye render");
+    }
+  }
   g_eyeCaptured[eye] = CaptureBackBuffer(g_eyeChains[eye]);
   g_eyeTan[eye][0] = tanHalfX;
   g_eyeTan[eye][1] = tanHalfY;

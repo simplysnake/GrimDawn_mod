@@ -59,6 +59,21 @@ using CameraGetProjectionFn = void (*)(const Camera* self, Mat4* out, const View
 inline constexpr char kCameraGetFrustum[] = "?GetFrustum@Camera@GAME@@QEBA?AVFrustum@2@AEBVViewport@2@@Z";
 using CameraGetFrustumFn = Frustum* (*)(const Camera* self, Frustum* result, const Viewport* viewport);
 
+// const WorldVec3& GraphicsMTRenderer::GetCameraTarget() const  (what the camera follows: the player)
+// WorldVec3 layout: Region* (8 bytes), then float x, y, z in the same space as Camera::GetCoords.
+inline constexpr char kRendererGetCameraTarget[] = "?GetCameraTarget@GraphicsMTRenderer@GAME@@QEBAAEBVWorldVec3@2@XZ";
+using RendererGetCameraTargetFn = const float* (*)(const GraphicsMTRenderer* self);
+
+// float WorldCamera::GetCameraDistance() const  (only valid if the camera is a WorldCamera)
+inline constexpr char kWorldCameraGetDistance[] = "?GetCameraDistance@WorldCamera@GAME@@QEBAMXZ";
+
+// Vec3 WorldCamera::GetOffsetFromTarget() const  (12-byte struct returned via hidden pointer)
+inline constexpr char kWorldCameraGetOffset[] = "?GetOffsetFromTarget@WorldCamera@GAME@@QEBA?AVVec3@2@XZ";
+struct Vec3Raw {
+  float x, y, z;
+};
+using WorldCameraGetOffsetFn = Vec3Raw* (*)(const Camera* self, Vec3Raw* result);
+
 // int Viewport::GetWidth/GetHeight() const
 inline constexpr char kViewportGetWidth[] = "?GetWidth@Viewport@GAME@@QEBAHXZ";
 inline constexpr char kViewportGetHeight[] = "?GetHeight@Viewport@GAME@@QEBAHXZ";

@@ -16,6 +16,7 @@
 
 #include "engine_api.h"
 #include "log.h"
+#include "mask.h"
 #include "perf.h"
 #include "vr_math.h"
 #include "xr.h"
@@ -53,6 +54,9 @@ gd::ViewportGetIntFn g_vpWidth = nullptr, g_vpHeight = nullptr;
 gd::CameraSetFloatFn g_setFov = nullptr, g_setAspect = nullptr, g_setFar = nullptr;
 gd::CameraGetProjectionFn g_getProj = nullptr;
 gd::CameraGetFrustumFn g_getFrustum = nullptr;
+gd::CameraGetFloatFn g_camDistance = nullptr;
+gd::WorldCameraGetOffsetFn g_camOffset = nullptr;
+gd::RendererGetCameraTargetFn g_cameraTarget = nullptr;
 
 std::atomic<int> g_inFlight{0};
 std::mutex g_mutex;
@@ -85,6 +89,8 @@ double NowMs() {
 // Floats 0-2, 3-5, 6-8, 9-11. The side axis points to screen-LEFT (the engine's projection
 // matrix has a negative X scale), so screen-right = -side.
 constexpr int kSide = 0, kUp = 3, kForward = 6, kOrigin = 9;
+// WorldVec3 (GetCameraTarget) = region pointer (8 bytes), then x, y, z: position at float index 2.
+constexpr int kTargetPos = 2;
 
 Vec3 Read3(const float* f, int at) { return {f[at], f[at + 1], f[at + 2]}; }
 void Write3(float* f, int at, Vec3 v) {
@@ -155,6 +161,17 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   const float savedFov = g_getFov(camera);
   const float savedAspect = g_getAspect(camera);
   const float savedFar = g_getFar(camera);
+  {
+    static double lastDiag = 0;
+    if (NowMs() - lastDiag > 1000.0) {
+      lastDiag = NowMs();
+      const float* t = g_cameraTarget(self);
+      const uint32_t* u = reinterpret_cast<const uint32_t*>(t);
+      Log("diag: target %.3f %.3f %.3f %.3f %.3f %.3f (raw %08X %08X %08X %08X %08X %08X) | origin %.3f %.3f %.3f fwd %.3f %.3f %.3f",
+          t[0], t[1], t[2], t[3], t[4], t[5], u[0], u[1], u[2], u[3], u[4], u[5], saved[9], saved[10], saved[11],
+          saved[6], saved[7], saved[8]);
+    }
+  }
   if (s.farPlane > 0) g_setFar(cam, s.farPlane);
 
   // Base frame the head moves in. Levelled by default so looking straight ahead in real life
@@ -197,8 +214,32 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
 
     if (eye == 0) perf::Mark(perf::kEye0Begin);
     const double t0 = NowMs();
+    mask::BeginCapture(unsigned(g_vpWidth(viewport)), unsigned(g_vpHeight(viewport)), s.maskDepthPick);
     g_origRender(self, camera, region, viewport, eyeFrustum, flags, flag2, worldFrustum);
+    mask::EndCapture();
     perf::AddEyeCpu(eye, NowMs() - t0);
+
+    // No camera target (main menu, character select): nothing to centre the fade on.
+    const float* target = g_cameraTarget(self);
+    const bool haveTarget = target[kTargetPos] != 0 || target[kTargetPos + 1] != 0 || target[kTargetPos + 2] != 0;
+    if (s.maskEnabled && haveTarget) {
+      mask::Params mp;
+      mp.right = toWorld(XrToCamera(Rotate(p.orientation, {1, 0, 0})));
+      mp.up = Read3(eyeCoords, kUp);
+      mp.forward = Read3(eyeCoords, kForward);
+      mp.origin = Read3(eyeCoords, kOrigin);
+      mp.tanX = tanX;
+      mp.tanY = tanY;
+      mp.nearPlane = g_getNear(camera);
+      mp.farPlane = g_getFar(camera);
+      mp.target = Read3(target, kTargetPos);
+      mp.inner = s.maskInner;
+      mp.outer = s.maskOuter;
+      mp.depthStart = s.maskDepthStart;
+      mp.strength = s.maskStrength;
+      mp.debug = s.maskDebug;
+      xr::ApplyMask(mp);
+    }
     xr::CaptureEye(eye, tanX, tanY);
     perf::Mark(eye == 0 ? perf::kEye0End : perf::kEye1End);
   }
@@ -317,6 +358,13 @@ void PollControlFile() {
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
   vr.bench = getInt(L"bench", vr.bench) != 0;
   vr.farPlane = getFloat(L"far_plane", vr.farPlane);
+  vr.maskEnabled = getInt(L"mask", vr.maskEnabled) != 0;
+  vr.maskInner = getFloat(L"mask_inner", vr.maskInner);
+  vr.maskOuter = getFloat(L"mask_outer", vr.maskOuter);
+  vr.maskDepthStart = getFloat(L"mask_depth_start", vr.maskDepthStart);
+  vr.maskStrength = getFloat(L"mask_strength", vr.maskStrength);
+  vr.maskDebug = getInt(L"mask_debug", vr.maskDebug) != 0;
+  vr.maskDepthPick = getInt(L"mask_depth_pick", vr.maskDepthPick);
   static int lastRecenter = 0;
   if (int r = getInt(L"recenter", lastRecenter); r != lastRecenter) {
     lastRecenter = r;
@@ -354,6 +402,9 @@ bool Install() {
   ok &= Resolve(engine, gd::kCameraSetFOV, g_setFov);
   ok &= Resolve(engine, gd::kCameraSetAspect, g_setAspect);
   ok &= Resolve(engine, gd::kCameraSetFar, g_setFar);
+  ok &= Resolve(engine, gd::kWorldCameraGetDistance, g_camDistance);
+  ok &= Resolve(engine, gd::kWorldCameraGetOffset, g_camOffset);
+  ok &= Resolve(engine, gd::kRendererGetCameraTarget, g_cameraTarget);
   ok &= Resolve(engine, gd::kCameraGetProjection, g_getProj);
   ok &= Resolve(engine, gd::kCameraGetFrustum, g_getFrustum);
   if (!ok) return false;

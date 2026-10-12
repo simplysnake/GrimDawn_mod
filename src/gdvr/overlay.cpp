@@ -14,12 +14,16 @@
 
 #include "engine_hooks.h"
 #include "log.h"
+#include "mask.h"
 #include "perf.h"
 #include "xr.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
 namespace gdvr::overlay {
+
+// Defined below; called from the Present hook on the render thread.
+void Teardown();
 
 namespace {
 
@@ -34,6 +38,9 @@ PresentFn g_origPresent = nullptr;
 ResizeBuffersFn g_origResizeBuffers = nullptr;
 
 std::atomic<int> g_inFlight{0};
+std::atomic<bool> g_teardownRequested{false};
+std::atomic<bool> g_tornDown{false};
+HANDLE g_teardownDone = nullptr;
 bool g_imguiReady = false;
 bool g_menuVisible = true;
 HWND g_window = nullptr;
@@ -48,7 +55,7 @@ struct InFlightGuard {
 };
 
 LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-  if (g_imguiReady && g_menuVisible) {
+  if (g_imguiReady && g_menuVisible && !g_tornDown) {
     ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp);
     const ImGuiIO& io = ImGui::GetIO();
     const bool mouseMsg = msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST;
@@ -92,8 +99,17 @@ bool InitImGui(IDXGISwapChain* swapChain) {
 
 HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swapChain, UINT syncInterval, UINT flags) {
   InFlightGuard guard;
+  if (g_tornDown) return g_origPresent(swapChain, syncInterval, flags);
+  if (g_teardownRequested) {
+    Teardown();
+    SetEvent(g_teardownDone);
+    return g_origPresent(swapChain, syncInterval, flags);
+  }
 
-  if (!g_imguiReady) g_imguiReady = InitImGui(swapChain);
+  if (!g_imguiReady) {
+    g_imguiReady = InitImGui(swapChain);
+    if (g_context) mask::InstallHook(g_context);
+  }
 
   static bool keyWasDown = false;
   const bool keyDown = (GetAsyncKeyState(kToggleKey) & 0x8000) != 0;
@@ -105,6 +121,16 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swapChain, UINT syncInterv
   if (g_imguiReady && g_menuVisible) {
     if (!g_rtv) CreateRtv(swapChain);
     ImGui_ImplDX11_NewFrame();
+    // If the backend failed to create its device objects the font atlas is empty and NewFrame
+    // would dereference a null font (seen once after a hot reload): skip the UI instead.
+    if (ImGui::GetIO().Fonts->Fonts.Size == 0) {
+      static bool warned = false;
+      if (!warned) Log("ImGui device objects missing (font atlas empty); debug window disabled");
+      warned = true;
+      g_menuVisible = false;
+    }
+  }
+  if (g_imguiReady && g_menuVisible) {
     ImGui_ImplWin32_NewFrame();
     ImGui::GetIO().MouseDrawCursor = true;
     ImGui::NewFrame();
@@ -178,7 +204,12 @@ bool Install() {
   return true;
 }
 
-void Shutdown() {
+// Releases everything that uses the D3D context or OpenXR, plus ImGui and the window hook.
+void Teardown() {
+  if (g_tornDown.exchange(true)) return;
+  xr::Shutdown();
+  mask::Shutdown();
+  perf::Shutdown();
   if (g_origWndProc) SetWindowLongPtrW(g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_origWndProc));
   if (g_imguiReady) {
     ImGui_ImplDX11_Shutdown();
@@ -192,7 +223,19 @@ void Shutdown() {
   g_rtv = nullptr;
   g_context = nullptr;
   g_device = nullptr;
+  Log("teardown complete");
 }
+
+bool RequestTeardown(unsigned timeoutMs) {
+  if (g_tornDown) return true;
+  g_teardownDone = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  g_teardownRequested = true;
+  const bool done = WaitForSingleObject(g_teardownDone, timeoutMs) == WAIT_OBJECT_0;
+  if (!done) g_teardownRequested = false;  // not presenting: caller tears down instead
+  return done;
+}
+
+void TeardownNow() { Teardown(); }
 
 int InFlight() { return g_inFlight.load(); }
 

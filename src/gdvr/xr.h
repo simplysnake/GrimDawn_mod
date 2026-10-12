@@ -1,6 +1,7 @@
 #pragma once
 // OpenXR (SteamVR) output: session, frame loop, per-eye capture.
 
+#include "mask.h"
 #include "vr_math.h"
 
 struct IDXGISwapChain;
@@ -18,6 +19,13 @@ struct Settings {
   float screenDistance = 2.0f;  // Screen mode: metres in front of you
   float screenWidth = 3.0f;     // Screen mode: metres wide
   float farPlane = 70.0f;       // far plane for the eye cameras (game: 120); the biggest performance lever
+  bool maskEnabled = true;       // fade to black around the player
+  float maskInner = 45.0f;      // horizontal distance from the player where the fade starts (game units)
+  float maskOuter = 62.0f;      // ... and where it is fully black
+  float maskDepthStart = 0.85f; // fraction of the far plane where the far-plane fade starts
+  float maskStrength = 1.0f;    // 0..1
+  bool maskDebug = false;       // distance rings (green inside, red fading, blue black)
+  int maskDepthPick = -1;       // which screen-sized depth buffer to use: -1 = last bound, 0/1 = first/second
   bool bench = false;           // render stereo even while the headset is asleep (for profiling)
 };
 
@@ -40,6 +48,9 @@ void EyeTanFov(int eye, float& tanHalfX, float& tanHalfY);
 // Copies the current back buffer into the eye's swapchain image. tanHalfX/Y describe the
 // symmetric frustum the game actually rendered with.
 void CaptureEye(int eye, float tanHalfX, float tanHalfY);
+
+// Draws the fade mask over the current back buffer (before CaptureEye).
+void ApplyMask(const mask::Params& p);
 
 // Releases the session and everything else (on unload).
 void Shutdown();

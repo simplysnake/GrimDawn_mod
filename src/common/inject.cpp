@@ -29,10 +29,15 @@ bool FindInjected(DWORD pid, HMODULE& base, std::wstring& path) {
   return found;
 }
 
+constexpr DWORD kRemoteTimeout = DWORD(-2);
+
 DWORD RunRemote(HANDLE process, void* fn, void* arg) {
   HANDLE t = CreateRemoteThread(process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(fn), arg, 0, nullptr);
   if (!t) return DWORD(-1);
-  WaitForSingleObject(t, 15000);
+  if (WaitForSingleObject(t, 15000) != WAIT_OBJECT_0) {
+    CloseHandle(t);
+    return kRemoteTimeout;
+  }
   DWORD code = 0;
   GetExitCodeThread(t, &code);
   CloseHandle(t);
@@ -84,7 +89,12 @@ bool Eject(HANDLE process, DWORD pid) {
     if (fn) {
       void* remoteFn = reinterpret_cast<BYTE*>(remoteBase) + (fn - reinterpret_cast<BYTE*>(local));
       wprintf(L"Shutting down %s...\n", path.c_str());
-      RunRemote(process, remoteFn, nullptr);
+      if (RunRemote(process, remoteFn, nullptr) == kRemoteTimeout) {
+        // Freeing it now would leave the game calling into unloaded code.
+        wprintf(L"Shutdown did not finish within 15 s; leaving the old copy loaded. Restart the game.\n");
+        FreeLibrary(local);
+        return false;
+      }
     }
     FreeLibrary(local);
   }
@@ -95,7 +105,9 @@ bool Eject(HANDLE process, DWORD pid) {
 }
 
 bool InjectFresh(HANDLE process, DWORD pid) {
-  Eject(process, pid);
+  HMODULE existing;
+  std::wstring existingPath;
+  if (FindInjected(pid, existing, existingPath) && !Eject(process, pid)) return false;
 
   // Source DLL sits next to the calling exe.
   wchar_t exePath[MAX_PATH];
