@@ -45,4 +45,5 @@ Log: `%LOCALAPPDATA%\gdvr\gdvr.log`
   `level_horizon`, `recompute_frustum`, `screen_distance`, `screen_width`, `recenter` (change the number to recentre),
   `far_plane` (default 70), `mask`, `mask_inner`/`mask_outer` (fade distances from the player, default 45/62),
   `mask_depth_start`, `mask_strength`, `mask_debug`, `mask_depth_pick`, `bench` (stereo while the headset sleeps).
+  HUD panel: `hud`, `hud_distance`, `hud_width`, `hud_down`, `hud_tilt` (metres / degrees).
 - The game must run windowed with vsync off: `tools\apply_vr_settings.ps1` applies recommended settings after the game exits.

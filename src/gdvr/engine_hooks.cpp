@@ -231,6 +231,9 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     perf::Mark(eye == 0 ? perf::kEye0End : perf::kEye1End);
   }
 
+  // Both eyes are captured: from here on the game draws its HUD, onto a transparent back buffer.
+  xr::PrepareHud();
+
   g_setFov(cam, savedFov);
   g_setAspect(cam, savedAspect);
   g_setFar(cam, savedFar);
@@ -344,6 +347,11 @@ void PollControlFile() {
   vr.screenDistance = getFloat(L"screen_distance", vr.screenDistance);
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
   vr.bench = getInt(L"bench", vr.bench) != 0;
+  vr.hud = getInt(L"hud", vr.hud) != 0;
+  vr.hudDistance = getFloat(L"hud_distance", vr.hudDistance);
+  vr.hudWidth = getFloat(L"hud_width", vr.hudWidth);
+  vr.hudDown = getFloat(L"hud_down", vr.hudDown);
+  vr.hudTiltDeg = getFloat(L"hud_tilt", vr.hudTiltDeg);
   vr.farPlane = getFloat(L"far_plane", vr.farPlane);
   vr.maskEnabled = getInt(L"mask", vr.maskEnabled) != 0;
   vr.maskInner = getFloat(L"mask_inner", vr.maskInner);

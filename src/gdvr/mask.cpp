@@ -36,6 +36,9 @@ DXGI_FORMAT g_depthFormat = DXGI_FORMAT_UNKNOWN;
 ID3D11Device* g_device = nullptr;
 ID3D11VertexShader* g_vs = nullptr;
 ID3D11PixelShader* g_ps = nullptr;
+ID3D11PixelShader* g_hudPs = nullptr;
+ID3D11Texture2D* g_hudCopy = nullptr;
+ID3D11ShaderResourceView* g_hudCopySrv = nullptr;
 ID3D11Buffer* g_cb = nullptr;
 ID3D11BlendState* g_blend = nullptr;
 ID3D11DepthStencilState* g_depthState = nullptr;
@@ -57,6 +60,7 @@ cbuffer Params : register(b0) {
   float4 color;   // a = strength
 };
 Texture2D<float> depthTex : register(t0);
+Texture2D<float4> hudTex : register(t0);
 
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
@@ -83,6 +87,11 @@ float4 PS(VSOut i) : SV_Target {
   float a = smoothstep(fade.x, fade.y, dist);
   a = max(a, smoothstep(fade.z, fade.w, z));
   return float4(color.rgb, a * color.a);
+}
+
+float4 PSHud(VSOut i) : SV_Target {
+  float4 c = hudTex.Load(int3(i.pos.xy, 0));
+  return float4(c.rgb, max(c.a, max(c.r, max(c.g, c.b))));
 }
 )";
 
@@ -138,19 +147,24 @@ void STDMETHODCALLTYPE HookOMSetRenderTargets(ID3D11DeviceContext* ctx, UINT n, 
 bool CreateResources() {
   ID3DBlob* vsBlob = nullptr;
   ID3DBlob* psBlob = nullptr;
+  ID3DBlob* hudBlob = nullptr;
   ID3DBlob* errors = nullptr;
   bool ok = SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mask", nullptr, nullptr, "VS", "vs_5_0", 0, 0,
                                  &vsBlob, &errors)) &&
             SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mask", nullptr, nullptr, "PS", "ps_5_0", 0, 0,
-                                 &psBlob, &errors));
+                                 &psBlob, &errors)) &&
+            SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mask", nullptr, nullptr, "PSHud", "ps_5_0", 0, 0,
+                                 &hudBlob, &errors));
   if (!ok) {
     Log("mask: shader compile failed: %s", errors ? static_cast<const char*>(errors->GetBufferPointer()) : "?");
   } else {
     ok = SUCCEEDED(g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_vs)) &&
-         SUCCEEDED(g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_ps));
+         SUCCEEDED(g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_ps)) &&
+         SUCCEEDED(g_device->CreatePixelShader(hudBlob->GetBufferPointer(), hudBlob->GetBufferSize(), nullptr, &g_hudPs));
   }
   SafeRelease(vsBlob);
   SafeRelease(psBlob);
+  SafeRelease(hudBlob);
   SafeRelease(errors);
   if (!ok) return false;
 
@@ -285,18 +299,88 @@ void BeginCapture(unsigned width, unsigned height, int pick) {
 }
 void EndCapture() { g_capturing = false; }
 
+// Lazily creates the shared device objects and an RTV for the back buffer `bb`.
+bool EnsureDeviceAndRtv(ID3D11Texture2D* bb) {
+  if (!g_device) {
+    bb->GetDevice(&g_device);
+    if (!CreateResources()) {
+      g_failed = true;
+      return false;
+    }
+  }
+  if (g_rtvTex != bb) {
+    SafeRelease(g_rtv);
+    if (FAILED(g_device->CreateRenderTargetView(bb, nullptr, &g_rtv))) return false;
+    g_rtvTex = bb;
+  }
+  return true;
+}
+
+bool FixHudAlpha(IDXGISwapChain* swapChain) {
+  if (!g_capturingAllowed || g_failed || !g_origOMSetRenderTargets || !swapChain) return false;
+  ID3D11Texture2D* bb = nullptr;
+  if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) return false;
+  bool ok = EnsureDeviceAndRtv(bb);
+  D3D11_TEXTURE2D_DESC bbDesc;
+  bb->GetDesc(&bbDesc);
+
+  // Source copy of the HUD (a texture cannot be read and written in the same draw).
+  if (ok && g_hudCopy) {
+    D3D11_TEXTURE2D_DESC d;
+    g_hudCopy->GetDesc(&d);
+    if (d.Width != bbDesc.Width || d.Height != bbDesc.Height || d.Format != bbDesc.Format) {
+      SafeRelease(g_hudCopySrv);
+      SafeRelease(g_hudCopy);
+    }
+  }
+  if (ok && !g_hudCopy) {
+    D3D11_TEXTURE2D_DESC d = bbDesc;
+    d.Usage = D3D11_USAGE_DEFAULT;
+    d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    d.CPUAccessFlags = 0;
+    d.MiscFlags = 0;
+    ok = SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &g_hudCopy)) &&
+         SUCCEEDED(g_device->CreateShaderResourceView(g_hudCopy, nullptr, &g_hudCopySrv));
+  }
+
+  if (ok) {
+    ID3D11DeviceContext* ctx = nullptr;
+    g_device->GetImmediateContext(&ctx);
+    ctx->CopyResource(g_hudCopy, bb);
+    StateBackup backup;
+    backup.Save(ctx);
+    D3D11_VIEWPORT vp{0, 0, float(bbDesc.Width), float(bbDesc.Height), 0, 1};
+    ctx->RSSetViewports(1, &vp);
+    ctx->RSSetState(g_raster);
+    ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);  // opaque: write rgb and the fixed alpha
+    ctx->OMSetDepthStencilState(g_depthState, 0);
+    g_origOMSetRenderTargets(ctx, 1, &g_rtv, nullptr);
+    ctx->PSSetShaderResources(0, 1, &g_hudCopySrv);
+    ctx->PSSetShader(g_hudPs, nullptr, 0);
+    ctx->VSSetShader(g_vs, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->IASetInputLayout(nullptr);
+    ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* none = nullptr;
+    ctx->PSSetShaderResources(0, 1, &none);
+    backup.Restore(ctx);
+    ctx->Release();
+  }
+  bb->Release();
+  return ok;
+}
+
 bool Apply(IDXGISwapChain* swapChain, const Params& p) {
   if (!g_capturingAllowed || g_failed || !g_depthTex || !g_origOMSetRenderTargets || !swapChain) return false;
 
   ID3D11Texture2D* bb = nullptr;
   if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) return false;
-  if (!g_device) {
-    bb->GetDevice(&g_device);
-    if (!CreateResources()) {
-      g_failed = true;
-      bb->Release();
-      return false;
-    }
+  if (!EnsureDeviceAndRtv(bb)) {
+    bb->Release();
+    return false;
   }
   ID3D11DeviceContext* ctx = nullptr;
   g_device->GetImmediateContext(&ctx);
@@ -306,11 +390,6 @@ bool Apply(IDXGISwapChain* swapChain, const Params& p) {
   g_depthTex->GetDesc(&depthDesc);
   bool ok = bbDesc.Width == depthDesc.Width && bbDesc.Height == depthDesc.Height;
 
-  if (ok && g_rtvTex != bb) {
-    SafeRelease(g_rtv);
-    ok = SUCCEEDED(g_device->CreateRenderTargetView(bb, nullptr, &g_rtv));
-    g_rtvTex = bb;
-  }
   if (ok && g_depthSrvTex != g_depthTex) {
     SafeRelease(g_depthSrv);
     D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
@@ -381,6 +460,9 @@ void Shutdown() {
   SafeRelease(g_rtv);
   SafeRelease(g_vs);
   SafeRelease(g_ps);
+  SafeRelease(g_hudPs);
+  SafeRelease(g_hudCopySrv);
+  SafeRelease(g_hudCopy);
   SafeRelease(g_cb);
   SafeRelease(g_blend);
   SafeRelease(g_depthState);

@@ -55,6 +55,10 @@ std::vector<int64_t> g_formats;
 
 Swapchain g_eyeChains[2];
 Swapchain g_screenChain;
+Swapchain g_hudChain;
+bool g_hudPrepared = false;              // back buffer cleared for the HUD this frame
+ID3D11RenderTargetView* g_bbRtv = nullptr;
+ID3D11Texture2D* g_bbRtvTex = nullptr;   // back buffer g_bbRtv was made for (not owned)
 
 bool g_frameBegun = false;
 XrFrameState g_frameState{XR_TYPE_FRAME_STATE};
@@ -99,6 +103,7 @@ void DestroyAll() {
   DestroySwapchain(g_eyeChains[0]);
   DestroySwapchain(g_eyeChains[1]);
   DestroySwapchain(g_screenChain);
+  DestroySwapchain(g_hudChain);
   if (g_viewSpace) xrDestroySpace(g_viewSpace);
   if (g_localSpace) xrDestroySpace(g_localSpace);
   if (g_session) xrDestroySession(g_session);
@@ -287,6 +292,7 @@ void PollEvents() {
 // Ends the frame begun by the previous OnPresent, submitting whatever was captured for it.
 void EndFrame() {
   XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  XrCompositionLayerQuad hudQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
   XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   XrCompositionLayerProjectionView pv[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
                                          {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
@@ -306,6 +312,25 @@ void EndFrame() {
       proj.viewCount = 2;
       proj.views = pv;
       layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&proj));
+
+      // HUD: the game drew only its UI onto the cleared back buffer; show it on a floating panel.
+      if (g_settings.hud && g_hudPrepared) {
+        mask::FixHudAlpha(g_gameSwapChain);
+        if (CaptureBackBuffer(g_hudChain)) {
+          const float tilt = -g_settings.hudTiltDeg * 3.14159265f / 180.0f;
+          const Quat pitch{std::sin(tilt * 0.5f), 0, 0, std::cos(tilt * 0.5f)};
+          const Quat yaw = g_ref.orientation;
+          hudQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+          hudQuad.space = g_localSpace;
+          hudQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+          hudQuad.subImage.swapchain = g_hudChain.handle;
+          hudQuad.subImage.imageRect = {{0, 0}, {int32_t(g_hudChain.width), int32_t(g_hudChain.height)}};
+          hudQuad.pose = ToXr({yaw * pitch, g_ref.position + Rotate(yaw, {0, -g_settings.hudDown, -g_settings.hudDistance})});
+          hudQuad.size = {g_settings.hudWidth,
+                          g_settings.hudWidth * float(g_hudChain.height) / float(std::max(1u, g_hudChain.width))};
+          layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&hudQuad));
+        }
+      }
     } else if (g_settings.mode != Mode::Off && CaptureBackBuffer(g_screenChain)) {
       // Screen mode, or stereo with nothing rendered this frame (menus, loading): flat screen.
       const Quat yaw = g_ref.orientation;
@@ -344,6 +369,7 @@ void BeginFrame() {
   if (!Check(xrBeginFrame(g_session, &bi), "xrBeginFrame")) return;
   g_frameBegun = true;
   g_eyeCaptured[0] = g_eyeCaptured[1] = false;
+  g_hudPrepared = false;
 
   // Head pose (for recentring) and eye views for this frame's predicted display time.
   XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
@@ -461,6 +487,25 @@ void ApplyMask(const mask::Params& p) {
   }
 }
 
+void PrepareHud() {
+  std::lock_guard lock(g_mutex);
+  if (!g_frameBegun || !g_settings.hud || !g_gameSwapChain) return;
+  ID3D11Texture2D* bb = nullptr;
+  if (FAILED(g_gameSwapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) return;
+  if (g_bbRtvTex != bb) {
+    if (g_bbRtv) g_bbRtv->Release();
+    g_bbRtv = nullptr;
+    g_device->CreateRenderTargetView(bb, nullptr, &g_bbRtv);
+    g_bbRtvTex = bb;
+  }
+  if (g_bbRtv) {
+    const float transparent[4] = {0, 0, 0, 0};
+    g_context->ClearRenderTargetView(g_bbRtv, transparent);
+    g_hudPrepared = true;
+  }
+  bb->Release();
+}
+
 void CaptureEye(int eye, float tanHalfX, float tanHalfY) {
   std::lock_guard lock(g_mutex);
   if (!g_frameBegun) return;
@@ -481,6 +526,9 @@ void Shutdown() {
     xrEndFrame(g_session, &ei);
   }
   DestroyAll();
+  if (g_bbRtv) g_bbRtv->Release();
+  g_bbRtv = nullptr;
+  g_bbRtvTex = nullptr;
   if (g_context) g_context->Release();
   if (g_device) g_device->Release();
   g_context = nullptr;

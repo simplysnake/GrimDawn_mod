@@ -26,6 +26,11 @@ struct Settings {
   float maskStrength = 1.0f;    // 0..1
   bool maskDebug = false;       // distance rings (green inside, red fading, blue black)
   int maskDepthPick = -1;       // which screen-sized depth buffer to use: -1 = last bound, 0/1 = first/second
+  bool hud = true;              // show the game's HUD on a floating panel in stereo mode
+  float hudDistance = 1.4f;     // metres in front of the recentred position
+  float hudWidth = 1.8f;        // metres wide (the panel covers the whole game screen)
+  float hudDown = 0.25f;        // metres below eye level
+  float hudTiltDeg = 12.0f;     // tilted back so it faces up towards you
   bool bench = false;           // render stereo even while the headset is asleep (for profiling)
 };
 
@@ -51,6 +56,10 @@ void CaptureEye(int eye, float tanHalfX, float tanHalfY);
 
 // Draws the fade mask over the current back buffer (before CaptureEye).
 void ApplyMask(const mask::Params& p);
+
+// Clears the back buffer to transparent black after both eyes are captured, so the game then
+// draws only its HUD onto it; the result is shown on the HUD panel.
+void PrepareHud();
 
 // Releases the session and everything else (on unload).
 void Shutdown();

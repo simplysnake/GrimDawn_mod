@@ -31,6 +31,11 @@ void EndCapture();
 // Draws the fade over the back buffer. Returns false if no usable depth buffer was found.
 bool Apply(IDXGISwapChain* swapChain, const Params& p);
 
+// HUD pass: makes every visible HUD pixel opaque enough to show (alpha >= brightness), since some
+// HUD elements are drawn without writing alpha. The HUD was drawn over transparent black, so its
+// colours are already premultiplied. Works in place on the back buffer.
+bool FixHudAlpha(IDXGISwapChain* swapChain);
+
 int InFlight();
 void Shutdown();
 
