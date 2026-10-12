@@ -56,6 +56,7 @@ add_library(gdvr SHARED
   src/gdvr/engine_hooks.cpp
   src/gdvr/overlay.cpp
   src/gdvr/log.cpp
+  src/gdvr/perf.cpp
   src/gdvr/xr.cpp)
 target_link_libraries(gdvr PRIVATE minhook imgui openxr_loader d3d11 dxgi)
 target_compile_definitions(gdvr PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)

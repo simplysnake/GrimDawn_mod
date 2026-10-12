@@ -43,6 +43,9 @@ using CameraGetFloatFn = float (*)(const Camera* self);
 inline constexpr char kCameraSetFOV[] = "?SetFOV@Camera@GAME@@QEAAXM@Z";
 using CameraSetFloatFn = void (*)(Camera* self, float value);
 
+// void Camera::SetFarPlane(float)
+inline constexpr char kCameraSetFar[] = "?SetFarPlane@Camera@GAME@@QEAAXM@Z";
+
 // void Camera::SetCameraAspect(float)  (multiplier on the viewport aspect; 1.0 by default)
 inline constexpr char kCameraSetAspect[] = "?SetCameraAspect@Camera@GAME@@QEAAXM@Z";
 

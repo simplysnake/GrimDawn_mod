@@ -14,6 +14,7 @@
 
 #include "engine_hooks.h"
 #include "log.h"
+#include "perf.h"
 #include "xr.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
@@ -114,6 +115,7 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swapChain, UINT syncInterv
   }
 
   xr::OnPresent(swapChain);
+  if (g_device) perf::OnPresent(g_device, g_context, xr::LastWaitMs());
   return g_origPresent(swapChain, syncInterval, flags);
 }
 

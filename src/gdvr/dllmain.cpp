@@ -5,6 +5,7 @@
 #include "engine_hooks.h"
 #include "log.h"
 #include "overlay.h"
+#include "perf.h"
 #include "xr.h"
 
 namespace {
@@ -31,9 +32,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI GDVR_Shutdown(LPVOID) {
   gdvr::Log("gdvr shutting down");
   MH_DisableHook(MH_ALL_HOOKS);
   // Wait until no thread is still executing inside one of our detours.
-  for (int i = 0; i < 200 && (gdvr::engine::InFlight() || gdvr::overlay::InFlight()); ++i) Sleep(10);
+  for (int i = 0; i < 200 && (gdvr::engine::InFlight() || gdvr::overlay::InFlight() || gdvr::perf::InFlight()); ++i) Sleep(10);
   Sleep(50);  // also lets threads that were between the trampoline and the guard drain
   gdvr::xr::Shutdown();
+  gdvr::perf::Shutdown();
   gdvr::overlay::Shutdown();
   MH_Uninitialize();
   gdvr::Log("gdvr unloaded");

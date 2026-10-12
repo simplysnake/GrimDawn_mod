@@ -66,6 +66,7 @@ Pose g_eyeRel[2];         // eye poses relative to g_ref
 bool g_eyeCaptured[2] = {};
 float g_eyeTan[2][2] = {};
 uint64_t g_framesSubmitted = 0;
+double g_lastWaitMs = 0;
 
 double NowMs() { return double(GetTickCount64()); }
 
@@ -332,7 +333,13 @@ void EndFrame() {
 void BeginFrame() {
   XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO};
   g_frameState = {XR_TYPE_FRAME_STATE};
-  if (!Check(xrWaitFrame(g_session, &wi, &g_frameState), "xrWaitFrame")) return;
+  LARGE_INTEGER f, t0, t1;
+  QueryPerformanceFrequency(&f);
+  QueryPerformanceCounter(&t0);
+  const bool waited = Check(xrWaitFrame(g_session, &wi, &g_frameState), "xrWaitFrame");
+  QueryPerformanceCounter(&t1);
+  g_lastWaitMs = 1000.0 * double(t1.QuadPart - t0.QuadPart) / double(f.QuadPart);
+  if (!waited) return;
   XrFrameBeginInfo bi{XR_TYPE_FRAME_BEGIN_INFO};
   if (!Check(xrBeginFrame(g_session, &bi), "xrBeginFrame")) return;
   g_frameBegun = true;
@@ -415,7 +422,7 @@ void OnPresent(IDXGISwapChain* swapChain) {
 
 bool StereoFrameActive() {
   std::lock_guard lock(g_mutex);
-  return g_running && g_frameBegun && g_frameState.shouldRender && g_viewsValid && g_haveRef &&
+  return g_running && g_frameBegun && (g_frameState.shouldRender || g_settings.bench) && g_viewsValid && g_haveRef &&
          g_settings.mode == Mode::Stereo;
 }
 
@@ -439,6 +446,8 @@ void CaptureEye(int eye, float tanHalfX, float tanHalfY) {
   g_eyeTan[eye][0] = tanHalfX;
   g_eyeTan[eye][1] = tanHalfY;
 }
+
+double LastWaitMs() { return g_lastWaitMs; }
 
 void Shutdown() {
   std::lock_guard lock(g_mutex);

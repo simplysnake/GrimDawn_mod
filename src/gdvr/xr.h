@@ -17,6 +17,8 @@ struct Settings {
   bool recomputeFrustum = true; // cull with the eye camera's own frustum (fixes holes when looking around)
   float screenDistance = 2.0f;  // Screen mode: metres in front of you
   float screenWidth = 3.0f;     // Screen mode: metres wide
+  float farPlane = 70.0f;       // far plane for the eye cameras (game: 120); the biggest performance lever
+  bool bench = false;           // render stereo even while the headset is asleep (for profiling)
 };
 
 Settings& GetSettings();
@@ -43,5 +45,8 @@ void CaptureEye(int eye, float tanHalfX, float tanHalfY);
 void Shutdown();
 
 void DrawDebugUI();
+
+// Time the last xrWaitFrame blocked (ms): how long the headset made the game wait.
+double LastWaitMs();
 
 }  // namespace gdvr::xr

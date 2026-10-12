@@ -16,6 +16,7 @@
 
 #include "engine_api.h"
 #include "log.h"
+#include "perf.h"
 #include "vr_math.h"
 #include "xr.h"
 
@@ -49,7 +50,7 @@ gd::CameraGetCoordsFn g_getCoords = nullptr;
 gd::CameraSetCoordsFn g_setCoords = nullptr;
 gd::CameraGetFloatFn g_getFov = nullptr, g_getNear = nullptr, g_getFar = nullptr, g_getAspect = nullptr;
 gd::ViewportGetIntFn g_vpWidth = nullptr, g_vpHeight = nullptr;
-gd::CameraSetFloatFn g_setFov = nullptr, g_setAspect = nullptr;
+gd::CameraSetFloatFn g_setFov = nullptr, g_setAspect = nullptr, g_setFar = nullptr;
 gd::CameraGetProjectionFn g_getProj = nullptr;
 gd::CameraGetFrustumFn g_getFrustum = nullptr;
 
@@ -153,6 +154,8 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   std::memcpy(saved, g_getCoords(camera), sizeof(saved));
   const float savedFov = g_getFov(camera);
   const float savedAspect = g_getAspect(camera);
+  const float savedFar = g_getFar(camera);
+  if (s.farPlane > 0) g_setFar(cam, s.farPlane);
 
   // Base frame the head moves in. Levelled by default so looking straight ahead in real life
   // means looking at the game's horizon (look down to see your character).
@@ -192,12 +195,17 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     if (s.recomputeFrustum)
       eyeFrustum = g_getFrustum(camera, reinterpret_cast<gd::Frustum*>(frustumBuf[eye]), viewport);
 
+    if (eye == 0) perf::Mark(perf::kEye0Begin);
+    const double t0 = NowMs();
     g_origRender(self, camera, region, viewport, eyeFrustum, flags, flag2, worldFrustum);
+    perf::AddEyeCpu(eye, NowMs() - t0);
     xr::CaptureEye(eye, tanX, tanY);
+    perf::Mark(eye == 0 ? perf::kEye0End : perf::kEye1End);
   }
 
   g_setFov(cam, savedFov);
   g_setAspect(cam, savedAspect);
+  g_setFar(cam, savedFar);
   g_setCoords(cam, reinterpret_cast<const gd::Coords*>(saved));
 }
 
@@ -307,6 +315,8 @@ void PollControlFile() {
   vr.recomputeFrustum = getInt(L"recompute_frustum", vr.recomputeFrustum) != 0;
   vr.screenDistance = getFloat(L"screen_distance", vr.screenDistance);
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
+  vr.bench = getInt(L"bench", vr.bench) != 0;
+  vr.farPlane = getFloat(L"far_plane", vr.farPlane);
   static int lastRecenter = 0;
   if (int r = getInt(L"recenter", lastRecenter); r != lastRecenter) {
     lastRecenter = r;
@@ -343,6 +353,7 @@ bool Install() {
   ok &= Resolve(engine, gd::kViewportGetHeight, g_vpHeight);
   ok &= Resolve(engine, gd::kCameraSetFOV, g_setFov);
   ok &= Resolve(engine, gd::kCameraSetAspect, g_setAspect);
+  ok &= Resolve(engine, gd::kCameraSetFar, g_setFar);
   ok &= Resolve(engine, gd::kCameraGetProjection, g_getProj);
   ok &= Resolve(engine, gd::kCameraGetFrustum, g_getFrustum);
   if (!ok) return false;
@@ -354,6 +365,7 @@ bool Install() {
     return false;
   }
   Log("Engine hooks created (GraphicsMTRenderer::Render @ %p)", render);
+  perf::InstallStageHooks(engine);
   return true;
 }
 

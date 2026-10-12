@@ -43,6 +43,7 @@ world_scale=15
 fov_deg=0
 level_horizon=1
 recompute_frustum=1
+far_plane=70
 "@ | Set-Content -Path $control -Encoding ascii
 Write-Output "Wrote $control"
 
