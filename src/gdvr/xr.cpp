@@ -465,36 +465,6 @@ void CaptureEye(int eye, float tanHalfX, float tanHalfY) {
   std::lock_guard lock(g_mutex);
   if (!g_frameBegun) return;
   eye &= 1;
-  static double lastDiag = 0;
-  if (eye == 0 && NowMs() - lastDiag > 3000.0) {
-    lastDiag = NowMs();
-    ID3D11RenderTargetView* rtvs[4] = {};
-    ID3D11DepthStencilView* dsv = nullptr;
-    g_context->OMGetRenderTargets(4, rtvs, &dsv);
-    for (int i = 0; i < 4; ++i) {
-      if (!rtvs[i]) continue;
-      ID3D11Resource* r = nullptr;
-      rtvs[i]->GetResource(&r);
-      D3D11_TEXTURE2D_DESC d{};
-      static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);
-      Log("diag: RTV%d %ux%u fmt %d bind 0x%X", i, d.Width, d.Height, int(d.Format), d.BindFlags);
-      r->Release();
-      rtvs[i]->Release();
-    }
-    if (dsv) {
-      ID3D11Resource* r = nullptr;
-      dsv->GetResource(&r);
-      D3D11_TEXTURE2D_DESC d{};
-      static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);
-      D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
-      dsv->GetDesc(&vd);
-      Log("diag: DSV %ux%u tex fmt %d view fmt %d bind 0x%X", d.Width, d.Height, int(d.Format), int(vd.Format), d.BindFlags);
-      r->Release();
-      dsv->Release();
-    } else {
-      Log("diag: no DSV bound after eye render");
-    }
-  }
   g_eyeCaptured[eye] = CaptureBackBuffer(g_eyeChains[eye]);
   g_eyeTan[eye][0] = tanHalfX;
   g_eyeTan[eye][1] = tanHalfY;

@@ -78,6 +78,19 @@ timestamp queries). `[vr] bench=1` renders stereo while the headset sleeps; `too
   must hide the cut-off.
 - Eye 0 consistently costs more than eye 1 (shared work done on the first pass).
 
+## Fade mask (2026-10-12) - confirmed working in the headset
+
+- Player position: `GraphicsMTRenderer::GetCameraTarget()` -> `WorldVec3` = `Region*` (8 bytes) + x, y, z in the
+  same space as `Camera::GetCoords` (camera sits 20 units back along its forward from it). All zero in menus.
+- The camera passed to `Render` is a plain `Camera` (WorldCamera getters return 0).
+- Scene depth: not bound after `Render`; found by hooking `ID3D11DeviceContext::OMSetRenderTargets` (vtable 33)
+  during each eye render. Each eye binds shadow maps (1536^2, 512^2, R16) and two screen-sized R24G8 depth buffers;
+  the last screen-sized one bound is correct (verified with the distance-ring debug view, F7).
+- Depth is standard (not reversed): z = n*f / (f - d*(f-n)).
+- Defaults: clear inside 45 units from the player, black by 62, plus a fade over the last 15% of the far plane.
+- Hot reload must tear down on the render thread (inside Present): doing it from the injector's thread raced the
+  D3D11 immediate context and hung the game.
+
 ## Week 1 questions (answer with the debug overlay)
 
 1. How many `Render` calls per frame, and which is the main view? (viewport size)

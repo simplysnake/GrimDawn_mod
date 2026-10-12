@@ -54,8 +54,6 @@ gd::ViewportGetIntFn g_vpWidth = nullptr, g_vpHeight = nullptr;
 gd::CameraSetFloatFn g_setFov = nullptr, g_setAspect = nullptr, g_setFar = nullptr;
 gd::CameraGetProjectionFn g_getProj = nullptr;
 gd::CameraGetFrustumFn g_getFrustum = nullptr;
-gd::CameraGetFloatFn g_camDistance = nullptr;
-gd::WorldCameraGetOffsetFn g_camOffset = nullptr;
 gd::RendererGetCameraTargetFn g_cameraTarget = nullptr;
 
 std::atomic<int> g_inFlight{0};
@@ -161,17 +159,6 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   const float savedFov = g_getFov(camera);
   const float savedAspect = g_getAspect(camera);
   const float savedFar = g_getFar(camera);
-  {
-    static double lastDiag = 0;
-    if (NowMs() - lastDiag > 1000.0) {
-      lastDiag = NowMs();
-      const float* t = g_cameraTarget(self);
-      const uint32_t* u = reinterpret_cast<const uint32_t*>(t);
-      Log("diag: target %.3f %.3f %.3f %.3f %.3f %.3f (raw %08X %08X %08X %08X %08X %08X) | origin %.3f %.3f %.3f fwd %.3f %.3f %.3f",
-          t[0], t[1], t[2], t[3], t[4], t[5], u[0], u[1], u[2], u[3], u[4], u[5], saved[9], saved[10], saved[11],
-          saved[6], saved[7], saved[8]);
-    }
-  }
   if (s.farPlane > 0) g_setFar(cam, s.farPlane);
 
   // Base frame the head moves in. Levelled by default so looking straight ahead in real life
@@ -402,8 +389,6 @@ bool Install() {
   ok &= Resolve(engine, gd::kCameraSetFOV, g_setFov);
   ok &= Resolve(engine, gd::kCameraSetAspect, g_setAspect);
   ok &= Resolve(engine, gd::kCameraSetFar, g_setFar);
-  ok &= Resolve(engine, gd::kWorldCameraGetDistance, g_camDistance);
-  ok &= Resolve(engine, gd::kWorldCameraGetOffset, g_camOffset);
   ok &= Resolve(engine, gd::kRendererGetCameraTarget, g_cameraTarget);
   ok &= Resolve(engine, gd::kCameraGetProjection, g_getProj);
   ok &= Resolve(engine, gd::kCameraGetFrustum, g_getFrustum);
