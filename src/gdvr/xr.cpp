@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "input.h"
 #include "log.h"
 
 namespace gdvr::xr {
@@ -100,6 +101,7 @@ void DestroySwapchain(Swapchain& sc) {
 }
 
 void DestroyAll() {
+  input::DestroyActions();
   DestroySwapchain(g_eyeChains[0]);
   DestroySwapchain(g_eyeChains[1]);
   DestroySwapchain(g_screenChain);
@@ -174,6 +176,8 @@ bool Init() {
   xrEnumerateSwapchainFormats(g_session, 0, &count, nullptr);
   g_formats.resize(count);
   xrEnumerateSwapchainFormats(g_session, count, &count, g_formats.data());
+
+  input::CreateActions(g_instance, g_session);
 
   XrSystemProperties props{XR_TYPE_SYSTEM_PROPERTIES};
   xrGetSystemProperties(g_instance, g_system, &props);
@@ -279,6 +283,11 @@ void PollEvents() {
         g_nextInitAttempt = NowMs() + kInitRetryMs;
         return;
       }
+    } else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+      // SteamVR "Reset View" (or similar): recentre on the new origin.
+      g_recenterRequested = true;
+    } else if (ev.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED) {
+      input::OnInteractionProfileChanged(g_instance, g_session);
     } else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
       DestroyAll();
       g_status = "runtime went away; will retry";
@@ -395,6 +404,9 @@ void BeginFrame() {
                  (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT);
   if (g_viewsValid && g_haveRef)
     for (int i = 0; i < 2; ++i) g_eyeRel[i] = Relative(g_ref, ToPose(g_views[i].pose));
+
+  // Controllers -> virtual gamepad (read by the game through XInputGetState).
+  if (input::Sync(g_session, g_state == XR_SESSION_STATE_FOCUSED)) g_recenterRequested = true;
 }
 
 }  // namespace

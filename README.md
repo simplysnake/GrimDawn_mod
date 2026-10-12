@@ -46,4 +46,10 @@ Log: `%LOCALAPPDATA%\gdvr\gdvr.log`
   `far_plane` (default 70), `mask`, `mask_inner`/`mask_outer` (fade distances from the player, default 45/62),
   `mask_depth_start`, `mask_strength`, `mask_debug`, `mask_depth_pick`, `bench` (stereo while the headset sleeps).
   HUD panel: `hud`, `hud_distance`, `hud_width`, `hud_down`, `hud_tilt` (metres / degrees).
+- **Controllers**: VR controllers act as a virtual gamepad (merged with any real gamepad) through the game's own
+  gamepad mode, so turn on *Gamepad Support* in the game's options. Default Index layout: left stick move,
+  right stick = right stick, right A/B = A/B, left A/B = X/Y, grips = bumpers, triggers = triggers, stick clicks,
+  right trackpad press = Start, left trackpad press = Back. D-pad and Recenter are unbound by default.
+  Remap everything in SteamVR: Settings > Controllers > Manage Controller Bindings > Grim Dawn VR.
+  SteamVR's *Reset View* also recentres.
 - The game must run windowed with vsync off: `tools\apply_vr_settings.ps1` applies recommended settings after the game exits.

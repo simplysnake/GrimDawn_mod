@@ -55,6 +55,7 @@ add_library(gdvr SHARED
   src/gdvr/dllmain.cpp
   src/gdvr/engine_hooks.cpp
   src/gdvr/overlay.cpp
+  src/gdvr/input.cpp
   src/gdvr/log.cpp
   src/gdvr/mask.cpp
   src/gdvr/perf.cpp

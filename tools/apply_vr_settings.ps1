@@ -22,6 +22,7 @@ $settings = [ordered]@{
   'cameraShake'       = 'false'      # comfort
   'shadowQuality'     = 'medium'     # performance (scene is drawn twice)
   'reflectionQuality' = 'medium'     # performance
+  'gamepadSupport'    = 'true'       # VR controllers drive the game through its gamepad mode
 }
 $lines = Get-Content $options
 foreach ($key in $settings.Keys) {

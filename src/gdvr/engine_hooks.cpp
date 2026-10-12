@@ -15,6 +15,7 @@
 #include <cmath>
 
 #include "engine_api.h"
+#include "input.h"
 #include "log.h"
 #include "mask.h"
 #include "perf.h"
@@ -476,6 +477,7 @@ void DrawDebugUI() {
     ImGui::Checkbox("Render scene twice (cost / stability test)", &g_exp.renderTwice);
   }
   xr::DrawDebugUI();
+  input::DrawDebugUI();
   ImGui::End();
 }
 
