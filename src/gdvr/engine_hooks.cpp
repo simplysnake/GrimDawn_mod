@@ -60,7 +60,7 @@ gd::CameraGetFrustumFn g_getFrustum = nullptr;
 gd::RendererGetCameraTargetFn g_cameraTarget = nullptr;
 gd::WorldFrustumInitializeFn g_wfInit = nullptr;
 gd::WorldFrustumGetRegionFn g_wfRegion = nullptr;
-bool g_eyeWorldFrustum = true;  // F4 toggles: per-eye world frustum (shadows / culling follow the eye)
+bool g_eyeWorldFrustum = false;  // F4 toggles (on culls leaves/walls wrongly - frustum space mismatch): per-eye world frustum (shadows / culling follow the eye)
 
 std::atomic<int> g_inFlight{0};
 std::mutex g_mutex;
@@ -259,6 +259,45 @@ void CounterDiagFrame(const void* renderer) {
   g_counterSnaps.clear();
 }
 
+// "Consumed" scan over the engine DLLs' writable data: words the first eye's render changes and
+// the second leaves alone (per-frame state the first render uses up). Sampled over 6 frames.
+int g_globalConsumedFrames = 0;
+std::vector<uint32_t> g_gSnap[3];
+std::vector<int> g_gHits;
+
+void GlobalSnap(int k) {
+  if (g_counterRegions.empty() || g_counterRegions[0].name != "Engine.dll+all") {
+    g_counterRegions.clear();
+    AddModuleDataSections(L"Engine.dll", "Engine.dll");
+    AddModuleDataSections(L"Game.dll", "Game.dll");
+    AddModuleDataSections(L"Direct3D11.dll", "Direct3D11.dll");
+    g_counterRegions.insert(g_counterRegions.begin(), Region{"Engine.dll+all", nullptr, 0});
+  }
+  g_gSnap[k].clear();
+  for (const Region& r : g_counterRegions)
+    if (r.words) g_gSnap[k].insert(g_gSnap[k].end(), r.base, r.base + r.words);
+}
+
+void GlobalConsumedFrame() {
+  if (g_gHits.size() != g_gSnap[0].size()) g_gHits.assign(g_gSnap[0].size(), 0);
+  for (size_t i = 0; i < g_gSnap[0].size(); ++i)
+    if (g_gSnap[0][i] != g_gSnap[1][i] && g_gSnap[1][i] == g_gSnap[2][i]) ++g_gHits[i];
+  if (--g_globalConsumedFrames > 0) return;
+  int found = 0;
+  size_t offset = 0;
+  for (const Region& r : g_counterRegions) {
+    for (size_t i = 0; i < r.words && found < 60; ++i)
+      if (g_gHits[offset + i] >= 5) {
+        Log("gconsumed: %s word +0x%zX (%p) %08X -> %08X (%d/6)", r.name.c_str(), i * 4, r.base + i,
+            g_gSnap[0][offset + i], g_gSnap[1][offset + i], g_gHits[offset + i]);
+        ++found;
+      }
+    offset += r.words;
+  }
+  Log("gconsumed: %d candidates", found);
+  g_gHits.clear();
+}
+
 // Optional fix under test: an address that is bumped (+1) for the second eye's render and
 // restored afterwards, so the engine treats that render as a new frame.
 uint32_t* g_bumpAddress = nullptr;
@@ -313,6 +352,8 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   alignas(16) static unsigned char frustumBuf[2][4096];
 
   if (g_counterDiagFrames > 0) CounterDiagFrame(self);
+  const bool globalScan = g_globalConsumedFrames > 0;
+  if (globalScan) GlobalSnap(0);
   std::vector<uint32_t> snaps[3];
   const size_t snapWords = g_toggleDiagFrames > 0 ? ReadableWords(self) : 0;
   auto snap = [&](int k) {
@@ -418,7 +459,9 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     xr::CaptureEye(eye, tanX, tanY);
     perf::Mark(pass == 0 ? perf::kEye0End : perf::kEye1End);
     snap(pass + 1);
+    if (globalScan) GlobalSnap(pass + 1);
   }
+  if (globalScan) GlobalConsumedFrame();
   if (snapWords) ToggleDiag(self, snaps[0], snaps[1], snaps[2]);
 
   // Both eyes are captured: from here on the game draws its HUD, onto a transparent back buffer.
@@ -538,6 +581,16 @@ void PollControlFile() {
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
   vr.bench = getInt(L"bench", vr.bench) != 0;
   vr.swapEyeOrder = getInt(L"swap_eye_order", vr.swapEyeOrder) != 0;
+  static int lastGlobal = 0;
+  if (int t = getInt(L"diag_gconsumed", lastGlobal); t != lastGlobal) {
+    lastGlobal = t;
+    g_globalConsumedFrames = 6;
+  }
+  static int lastDump = 0;
+  if (int t = getInt(L"dump_eyes", lastDump); t != lastDump) {
+    lastDump = t;
+    xr::RequestEyeDump();
+  }
   static int lastTrace = 0;
   if (int t = getInt(L"diag_trace", lastTrace); t != lastTrace) {
     lastTrace = t;

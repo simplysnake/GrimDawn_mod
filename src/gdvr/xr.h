@@ -67,6 +67,9 @@ void Shutdown();
 
 void DrawDebugUI();
 
+// Saves the next frame's eye images to %LOCALAPPDATA%\gdvr\eye0.bmp / eye1.bmp (also F11).
+void RequestEyeDump();
+
 // Time the last xrWaitFrame blocked (ms): how long the headset made the game wait.
 double LastWaitMs();
 

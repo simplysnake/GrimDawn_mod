@@ -58,6 +58,14 @@ Stage g_stages[] = {
     {"Def.Fog", "?RenderFog@GraphicsDeferredRenderer@GAME@@AEAAXAEBVGraphicsScene@2@@Z"},
     {"Def.FinalScene", "?RenderFinalScene@GraphicsDeferredRenderer@GAME@@UEAAXAEAVGraphicsScene@2@@Z"},
     {"Def.Stencil", "?RenderStencilBuffer@GraphicsDeferredRenderer@GAME@@AEAAXAEBVViewport@2@HAEBVColor@2@@Z"},
+    // Terrain / grass (investigating the grass outlines in the second eye)
+    {"Terrain.Update", "?Update@Terrain@GAME@@UEAAXQEBVFrustum@2@IH@Z"},
+    {"TerrainPatch.Update", "?Update@TerrainPatch@GAME@@UEAAXH@Z"},
+    {"Grass.UpdateOffsetField", "?UpdateOffsetField@GrassObject@GAME@@MEAAXAEAVTerrainBase@2@AEBV?$vector@I@mem@@HHH@Z"},
+    {"Grass.SetupGeometry", "?SetupGrassGeometry@GrassObject@GAME@@MEAAXPEAVTerrainBase@2@AEBV?$vector@I@mem@@HHHHPEAVTerrainPatch@2@@Z"},
+    {"TRI.RenderGrass", "?RenderGrass@TerrainRenderInterface@GAME@@EEBAXPEBVTerrainRenderBatch@2@AEBVName@2@AEAVGraphicsCanvas@2@AEBVGraphicsScene@2@AEBURenderablePass@2@H@Z"},
+    {"TRIRT.RenderGrass", "?RenderGrass@TerrainRenderInterfaceRT@GAME@@EEBAXPEBVTerrainRenderBatch@2@AEBVName@2@AEAVGraphicsCanvas@2@AEBVGraphicsScene@2@AEBURenderablePass@2@H@Z"},
+    {"Patch.RenderGrass", "?RenderGrass@TerrainPatch@GAME@@IEBAXAEBURenderablePass@2@AEBVName@2@AEAVGraphicsCanvas@2@AEBVGraphicsScene@2@@Z"},
     // Highlight / outline setters (diagnostic for "glow only in one eye"); first arg is a bool.
     {"Mesh.SetOutlined", "?SetOutlined@GraphicsMeshInstance@GAME@@QEAAX_N@Z", true},
     {"Mesh.SetOutlineColor", "?SetOutlineColor@GraphicsMeshInstance@GAME@@QEAAXAEBVColor@2@@Z"},

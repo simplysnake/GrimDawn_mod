@@ -72,6 +72,7 @@ bool g_eyeCaptured[2] = {};
 float g_eyeTan[2][2] = {};
 uint64_t g_framesSubmitted = 0;
 double g_lastWaitMs = 0;
+std::atomic<int> g_dumpEyes{0};  // F11: bit per eye still to dump
 
 double NowMs() { return double(GetTickCount64()); }
 
@@ -424,7 +425,10 @@ void OnPresent(IDXGISwapChain* swapChain) {
 
   // Hotkeys: F7 cycles the mask (on -> distance rings -> off), F9 cycles Off -> Screen -> Stereo,
   // F10 recentres.
-  static bool f6Was = false, f7Was = false, f9Was = false, f10Was = false;
+  static bool f6Was = false, f7Was = false, f9Was = false, f10Was = false, f11Was = false;
+  const bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+  if (f11 && !f11Was) g_dumpEyes = 3;
+  f11Was = f11;
   const bool f6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
   if (f6 && !f6Was) {
     g_settings.swapEyeOrder = !g_settings.swapEyeOrder;
@@ -496,6 +500,62 @@ void EyeTanFov(int eye, float& tanHalfX, float& tanHalfY) {
   tanHalfY = std::max(std::tan(std::fabs(f.angleUp)), std::tan(std::fabs(f.angleDown)));
 }
 
+// ---- Eye image dump (F11): writes what each eye receives to %LOCALAPPDATA%\gdvr\eyeN.bmp ----
+
+void DumpBackBuffer(int eye) {
+  ID3D11Texture2D* bb = nullptr;
+  if (FAILED(g_gameSwapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) return;
+  D3D11_TEXTURE2D_DESC d;
+  bb->GetDesc(&d);
+  D3D11_TEXTURE2D_DESC sd = d;
+  sd.Usage = D3D11_USAGE_STAGING;
+  sd.BindFlags = 0;
+  sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  sd.MiscFlags = 0;
+  ID3D11Texture2D* staging = nullptr;
+  if (SUCCEEDED(g_device->CreateTexture2D(&sd, nullptr, &staging))) {
+    g_context->CopyResource(staging, bb);
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(g_context->Map(staging, 0, D3D11_MAP_READ, 0, &m))) {
+      const bool rgba = d.Format == DXGI_FORMAT_R8G8B8A8_UNORM || d.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+      std::vector<uint8_t> px(size_t(d.Width) * d.Height * 3);
+      for (UINT y = 0; y < d.Height; ++y) {
+        const uint8_t* row = static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch;
+        uint8_t* out = px.data() + size_t(d.Height - 1 - y) * d.Width * 3;  // BMP rows go bottom-up
+        for (UINT x = 0; x < d.Width; ++x) {
+          const uint8_t* p = row + x * 4;
+          out[x * 3 + 0] = rgba ? p[2] : p[0];
+          out[x * 3 + 1] = p[1];
+          out[x * 3 + 2] = rgba ? p[0] : p[2];
+        }
+      }
+      g_context->Unmap(staging, 0);
+      wchar_t base[MAX_PATH];
+      GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+      const std::wstring path = std::wstring(base) + L"\\gdvr\\eye" + std::to_wstring(eye) + L".bmp";
+      FILE* f = nullptr;
+      if (_wfopen_s(&f, path.c_str(), L"wb") == 0 && f) {
+        const uint32_t dataSize = uint32_t(px.size()), fileSize = 54 + dataSize;
+        uint8_t h[54] = {'B', 'M'};
+        std::memcpy(h + 2, &fileSize, 4);
+        const uint32_t off = 54, hs = 40, planesBpp = 1 | (24 << 16);
+        std::memcpy(h + 10, &off, 4);
+        std::memcpy(h + 14, &hs, 4);
+        std::memcpy(h + 18, &d.Width, 4);
+        std::memcpy(h + 22, &d.Height, 4);
+        std::memcpy(h + 26, &planesBpp, 4);
+        std::memcpy(h + 34, &dataSize, 4);
+        fwrite(h, 1, 54, f);
+        fwrite(px.data(), 1, px.size(), f);
+        fclose(f);
+        Log("dumped eye %d image (%ux%u)", eye, d.Width, d.Height);
+      }
+    }
+    staging->Release();
+  }
+  bb->Release();
+}
+
 void ApplyMask(const mask::Params& p) {
   std::lock_guard lock(g_mutex);
   static bool warned = false;
@@ -528,12 +588,18 @@ void CaptureEye(int eye, float tanHalfX, float tanHalfY) {
   std::lock_guard lock(g_mutex);
   if (!g_frameBegun) return;
   eye &= 1;
+  if (g_dumpEyes & (1 << eye)) {
+    DumpBackBuffer(eye);
+    g_dumpEyes &= ~(1 << eye);
+  }
   g_eyeCaptured[eye] = CaptureBackBuffer(g_eyeChains[eye]);
   g_eyeTan[eye][0] = tanHalfX;
   g_eyeTan[eye][1] = tanHalfY;
 }
 
 double LastWaitMs() { return g_lastWaitMs; }
+
+void RequestEyeDump() { g_dumpEyes = 3; }
 
 void Shutdown() {
   std::lock_guard lock(g_mutex);

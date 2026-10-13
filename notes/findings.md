@@ -101,6 +101,17 @@ timestamp queries). `[vr] bench=1` renders stereo while the headset sleeps; `too
 - Fix: copy those 16 bytes before the first eye and restore them before the second. F5 toggles it.
 - Not it: the Engine.dll frame counter (+0x41C574) - bumping it changed nothing (kept, off).
 
+## Grass outlines in the second eye (2026-10-12) - open
+
+- Eye dumps (F11 / dump_eyes -> %LOCALAPPDATA%\gdvr\eyeN.bmp): the right eye's grass is covered in dark
+  streaks; everything else matches the left eye.
+- Pass structure is identical per eye (D3D trace); the difference is in grass data.
+- `GrassObject::SetupGrassGeometry` runs 0x/frame in mono, ~1.6-6x/frame in stereo (mostly in the first eye).
+  Wide FOV = ~26 grass draws per eye vs 4 in mono, and the two eye cameras alternate, so grass geometry
+  is rebuilt continuously; the second eye draws stale/partly rebuilt grass blocks.
+- Not it: world frustum per eye (F4) - culls leaves/walls wrongly (frustum space mismatch), default off.
+- No per-frame state consumed by the first eye in the engine DLLs' globals (diag_gconsumed).
+
 ## Week 1 questions (answer with the debug overlay)
 
 1. How many `Render` calls per frame, and which is the main view? (viewport size)
