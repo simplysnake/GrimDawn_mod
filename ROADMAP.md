@@ -32,51 +32,51 @@ with the devotion constellations as the sky.
 - Auto-dim from the average brightness of the eye images (more in daylight, none at night).
 - Optional soft dark halo behind HUD elements so they read against bright ground.
 
-### 4. See-through walls and trees from the head – small/medium
+### 4. Floating labels in the world – medium
+- Monster health bars, damage numbers and item names currently land on the HUD panel at flat-screen
+  positions; project them into the 3D scene instead (same projection idea as the world cursor).
+
+### 5. See-through walls and trees from the head – small/medium
 - The game fades walls/trees between its camera and the character (`GameCamera::UpdateTransparencyFrustum`),
   computed from the game camera; in VR they can block the view without fading.
 - Compute the transparency from the head/eye position instead.
 
-### 5. Mouse in VR: world cursor – medium (1–2 weeks)
+### 6. Mouse in VR: world cursor – medium (1–2 weeks)
 - Hide the game cursor; keep a cursor in the 3D world, clamped to the masked area around the player.
 - Mouse deltas move it relative to the view; draw it as a 3D marker in both eyes.
 - Each frame, project it through the game's own camera (`Camera::Project` / `GetImagePoint`) and feed that
   screen position to the game, so hover, highlight and click-to-move work unchanged.
 - Over the HUD panel, switch to 2D panel coordinates (inventory, skills, menus).
 
-### 6. Gaze cursor – small once 5 exists (~1 day)
+### 7. Gaze cursor – small once 6 exists (~1 day)
 - Cursor defaults to where the head points on the ground; mouse movement lets it drift off;
   after a short idle time it glides back to the gaze point.
 - Same pipeline for a controller laser pointer.
 
-### 7. Comfort – medium
+### 8. Comfort – medium
 - Stabilised world: smooth camera follow instead of locked to the character (motion-sickness risk).
 - Live world-scale control (stick / mouse wheel) from tabletop to close-up.
 - Seated and standing presets.
 - Decide how the game's own camera zoom (mouse wheel) and rotation behave alongside world scale and the
   level-horizon view.
 
-### 8. Head-tracked 3D audio – small
+### 9. Head-tracked 3D audio – small
 - The game puts the audio listener at its own camera (`WorldCamera::SetListenerPosition`); move it to the
   head so sounds turn with you.
 
-### 9. Interiors, caves and dungeons – test + fixes
+### 10. Interiors, caves and dungeons – test + fixes
 - So far only tested outdoors. With the level-horizon view, looking up indoors may show ceilings, void or
   culling holes; may need per-area camera rules or a different mask.
 
-### 10. Screen-space effects – test + fixes
+### 11. Screen-space effects – test + fixes
 - Rain/snow overlays, hit flashes, blur ("screen effects" option) assume a flat screen; check each in
   stereo, fix or disable in VR.
 
-### 11. Constellation skybox – medium (1–2 weeks)
+### 12. Constellation skybox – medium (1–2 weeks)
 - No text: only constellation art, stars and the glow of completed constellations.
 - Extract art from the user's own install on first run (never ship game assets).
 - Constellation layout from the game database; completed state from the save file first, live memory later.
 - Draw in the mask shader: "void" pixels sample the sky in their view direction instead of black.
-
-### 12. Floating labels in the world – medium
-- Monster health bars, damage numbers and item names currently land on the HUD panel at flat-screen
-  positions; project them into the 3D scene instead (same projection idea as the world cursor).
 
 ### 13. UI-heavy screens – usability pass
 - Full-screen map (M) – ideally as a tabletop map; merchants/stash, dialogue, character select, the real
