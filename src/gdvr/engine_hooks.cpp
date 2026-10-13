@@ -178,6 +178,85 @@ void ToggleDiag(const void* renderer, const std::vector<uint32_t>& s0, const std
   g_toggleHits.clear();
 }
 
+// ---- Diagnostic: find frame counters --------------------------------------------------------
+// Snapshots writable memory (the renderer object and the writable sections of the engine DLLs)
+// at the start of consecutive stereo frames and reports 32-bit words that grow by exactly 1 per
+// frame. One of them is likely what makes post-processing run only once per frame.
+struct Region {
+  std::string name;
+  const uint32_t* base;
+  size_t words;
+};
+std::vector<Region> g_counterRegions;
+std::vector<std::vector<uint32_t>> g_counterSnaps;  // [frame] concatenated words
+int g_counterDiagFrames = 0;
+
+void AddModuleDataSections(const wchar_t* module, const char* label) {
+  auto* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(module));
+  if (!base) return;
+  auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+  auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+  const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+  for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec)
+    if (sec->Characteristics & IMAGE_SCN_MEM_WRITE) {
+      char nm[9] = {};
+      std::memcpy(nm, sec->Name, 8);
+      g_counterRegions.push_back({std::string(label) + "+" + std::to_string(sec->VirtualAddress),
+                                  reinterpret_cast<const uint32_t*>(base + sec->VirtualAddress),
+                                  sec->Misc.VirtualSize / 4});
+    }
+}
+
+void CounterDiagFrame(const void* renderer) {
+  if (g_counterSnaps.empty()) {
+    g_counterRegions.clear();
+    g_counterRegions.push_back({"renderer", static_cast<const uint32_t*>(renderer), ReadableWords(renderer)});
+    AddModuleDataSections(L"Engine.dll", "Engine.dll");
+    AddModuleDataSections(L"Game.dll", "Game.dll");
+    AddModuleDataSections(L"Direct3D11.dll", "Direct3D11.dll");
+  }
+  std::vector<uint32_t> snap;
+  for (const Region& r : g_counterRegions) snap.insert(snap.end(), r.base, r.base + r.words);
+  g_counterSnaps.push_back(std::move(snap));
+  if (--g_counterDiagFrames > 0) return;
+
+  // Words that increase by exactly 1 between every pair of consecutive frames.
+  const auto& f = g_counterSnaps;
+  int found = 0;
+  size_t offset = 0;
+  for (const Region& r : g_counterRegions) {
+    for (size_t i = 0; i < r.words && found < 60; ++i) {
+      bool counter = true;
+      for (size_t k = 1; k < f.size() && counter; ++k) counter = f[k][offset + i] == f[k - 1][offset + i] + 1;
+      if (counter) {
+        Log("counter: %s word +0x%zX (addr %p) = %u", r.name.c_str(), i * 4, r.base + i, f.back()[offset + i]);
+        ++found;
+      }
+    }
+    offset += r.words;
+  }
+  Log("counter: %d candidates over %zu frames", found, f.size());
+  g_counterSnaps.clear();
+}
+
+// Optional fix under test: an address that is bumped (+1) for the second eye's render and
+// restored afterwards, so the engine treats that render as a new frame.
+uint32_t* g_bumpAddress = nullptr;
+bool g_bumpEnabled = true;   // F5 toggles, for A/B comparison in the headset
+
+// Engine frame counter (found with diag_counter): bumping it for the second eye makes the engine
+// run its once-per-frame post-processing (FXAA, glow) for that eye too.
+constexpr char kDefaultBump[] = "Engine.dll+0x41C574";
+
+uint32_t* ResolveBump(const char* spec) {
+  char mod[64] = {};
+  const char* plus = std::strchr(spec, '+');
+  if (!plus || plus - spec >= int(sizeof(mod))) return nullptr;
+  std::memcpy(mod, spec, plus - spec);
+  HMODULE m = GetModuleHandleA(mod);
+  return m ? reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(m) + std::strtoull(plus + 1, nullptr, 16)) : nullptr;
+}
+
 // Renders the scene once per eye: the game camera is replaced by the eye's camera
 // (game camera + head pose), the result is captured for the headset, and the camera is restored.
 void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Region* region,
@@ -207,6 +286,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   // Frustum objects are built in place by the engine (size unknown, so over-allocate).
   alignas(16) static unsigned char frustumBuf[2][4096];
 
+  if (g_counterDiagFrames > 0) CounterDiagFrame(self);
   std::vector<uint32_t> snaps[3];
   const size_t snapWords = g_toggleDiagFrames > 0 ? ReadableWords(self) : 0;
   auto snap = [&](int k) {
@@ -243,7 +323,18 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     const double t0 = NowMs();
     mask::BeginCapture(unsigned(g_vpWidth(viewport)), unsigned(g_vpHeight(viewport)), s.maskDepthPick);
     perf::SetCurrentEye(eye);
+    static bool f5Was = false;
+    const bool f5 = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
+    if (pass == 0 && f5 && !f5Was) {
+      g_bumpEnabled = !g_bumpEnabled;
+      Log("second-eye frame bump -> %s", g_bumpEnabled ? "on" : "off");
+    }
+    if (pass == 0) f5Was = f5;
+    if (!g_bumpAddress) g_bumpAddress = ResolveBump(kDefaultBump);
+    uint32_t* bump = pass == 1 && g_bumpEnabled ? g_bumpAddress : nullptr;
+    if (bump) ++*bump;
     g_origRender(self, camera, region, viewport, eyeFrustum, flags, flag2, worldFrustum);
+    if (bump) --*bump;
     perf::SetCurrentEye(-1);
     mask::EndCapture();
     perf::AddEyeCpu(eye, NowMs() - t0);
@@ -392,6 +483,27 @@ void PollControlFile() {
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
   vr.bench = getInt(L"bench", vr.bench) != 0;
   vr.swapEyeOrder = getInt(L"swap_eye_order", vr.swapEyeOrder) != 0;
+  static int lastCounterDiag = 0;
+  if (int t = getInt(L"diag_counter", lastCounterDiag); t != lastCounterDiag) {
+    lastCounterDiag = t;
+    g_counterDiagFrames = 8;
+  }
+  {
+    wchar_t buf[64];
+    // "Module.dll+0xRVA" (stable across launches) or an absolute hex address.
+    GetPrivateProfileStringW(L"vr", L"bump_address", L"", buf, 64, path.c_str());
+    if (!buf[0]) goto noBump;  // keep the default
+    g_bumpAddress = nullptr;
+    if (wchar_t* plus = wcschr(buf, L'+')) {
+      *plus = 0;
+      if (HMODULE mod = GetModuleHandleW(buf))
+        g_bumpAddress = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(mod) + _wcstoui64(plus + 1, nullptr, 16));
+    } else if (buf[0]) {
+      g_bumpAddress = reinterpret_cast<uint32_t*>(_wcstoui64(buf, nullptr, 16));
+    }
+    if (g_bumpAddress) Log("bump address %p for the second eye", g_bumpAddress);
+  noBump:;
+  }
   static int lastToggleDiag = 0;
   if (int t = getInt(L"diag_toggle", lastToggleDiag); t != lastToggleDiag) {
     lastToggleDiag = t;
