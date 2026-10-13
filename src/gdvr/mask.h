@@ -44,8 +44,10 @@ bool FixHudAlpha(IDXGISwapChain* swapChain);
 void OnCopyResource(void* dst, void* src);  // called for copies made during an eye render
 void RestoreEyeHistory(int eye);
 void SaveEyeHistory(int eye);
-void SetEyeHistoryEnabled(bool on);
-bool EyeHistoryEnabled();
+// Mode: 0 = engine default (other eye's depth), 1 = per-eye history (aligned but a frame late),
+// 2 = cleared to far depth before each eye (soft blending switched off; the default).
+void SetDepthHistoryMode(int mode);
+int DepthHistoryMode();
 
 int InFlight();
 void Shutdown();

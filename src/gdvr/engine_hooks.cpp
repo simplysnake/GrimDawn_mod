@@ -472,8 +472,9 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
       static bool f1Was = false;
       const bool f1 = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
       if (pass == 0 && f1 && !f1Was) {
-        mask::SetEyeHistoryEnabled(!mask::EyeHistoryEnabled());
-        Log("per-eye depth history -> %s", mask::EyeHistoryEnabled() ? "on" : "off");
+        static const char* kModes[] = {"engine default", "per-eye history", "soft blend off"};
+        mask::SetDepthHistoryMode((mask::DepthHistoryMode() + 1) % 3);
+        Log("depth history mode -> %s", kModes[mask::DepthHistoryMode()]);
       }
       if (pass == 0) f1Was = f1;
       static bool f2Was = false;
@@ -665,6 +666,7 @@ void PollControlFile() {
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
   vr.bench = getInt(L"bench", vr.bench) != 0;
   g_keepGrass = getInt(L"keep_grass", g_keepGrass) != 0;
+  mask::SetDepthHistoryMode(std::clamp(getInt(L"depth_history", mask::DepthHistoryMode()), 0, 2));
   vr.swapEyeOrder = getInt(L"swap_eye_order", vr.swapEyeOrder) != 0;
   {
     wchar_t buf[256];

@@ -53,7 +53,8 @@ bool g_failed = false;
 // Per-eye depth history (see mask.h)
 ID3D11Texture2D* g_historyTarget = nullptr;   // the engine's depth copy (not owned)
 ID3D11Texture2D* g_history[2] = {};           // our saved copy per eye (owned)
-std::atomic<bool> g_historyEnabled{true};
+std::atomic<int> g_historyMode{2};
+ID3D11DepthStencilView* g_historyDsv = nullptr;  // for clearing the engine's depth copy (mode 2)
 
 constexpr char kShader[] = R"(
 cbuffer Params : register(b0) {
@@ -468,6 +469,7 @@ void OnCopyResource(void* dstPtr, void* srcPtr) {
     if (dd.Width == g_wantWidth && dd.Height == g_wantHeight && SrvFormatFor(dd.Format) && sd.Format == dd.Format &&
         (sd.BindFlags & D3D11_BIND_DEPTH_STENCIL)) {
       g_historyTarget = d;  // engine-owned; it lives as long as its render targets
+      SafeRelease(g_historyDsv);
       SafeRelease(g_history[0]);
       SafeRelease(g_history[1]);
       Log("depth history: engine depth copy %p (%ux%u f%d)", static_cast<void*>(d), dd.Width, dd.Height, int(dd.Format));
@@ -477,8 +479,42 @@ void OnCopyResource(void* dstPtr, void* srcPtr) {
   SafeRelease(s);
 }
 
+DXGI_FORMAT DsvFormatFor(DXGI_FORMAT f) {
+  switch (f) {
+    case DXGI_FORMAT_R24G8_TYPELESS: return DXGI_FORMAT_D24_UNORM_S8_UINT;
+    case DXGI_FORMAT_R32_TYPELESS: return DXGI_FORMAT_D32_FLOAT;
+    case DXGI_FORMAT_R32G8X24_TYPELESS: return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    case DXGI_FORMAT_R16_TYPELESS: return DXGI_FORMAT_D16_UNORM;
+    default: return DXGI_FORMAT_UNKNOWN;
+  }
+}
+
 void RestoreEyeHistory(int eye) {
-  if (!g_historyEnabled || !g_historyTarget || !g_history[eye & 1]) return;
+  if (!g_historyTarget) return;
+  if (g_historyMode == 2) {
+    ID3D11Device* dev = nullptr;
+    g_historyTarget->GetDevice(&dev);
+    if (!g_historyDsv) {
+      D3D11_TEXTURE2D_DESC d;
+      g_historyTarget->GetDesc(&d);
+      D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
+      vd.Format = DsvFormatFor(d.Format);
+      vd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+      if (vd.Format == DXGI_FORMAT_UNKNOWN || FAILED(dev->CreateDepthStencilView(g_historyTarget, &vd, &g_historyDsv))) {
+        Log("depth history: cannot clear the engine depth copy; falling back to per-eye history");
+        g_historyMode = 1;
+      }
+    }
+    if (g_historyDsv) {
+      ID3D11DeviceContext* ctx = nullptr;
+      dev->GetImmediateContext(&ctx);
+      ctx->ClearDepthStencilView(g_historyDsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+      ctx->Release();
+    }
+    dev->Release();
+    return;
+  }
+  if (g_historyMode != 1 || !g_history[eye & 1]) return;
   ID3D11Device* dev = nullptr;
   g_historyTarget->GetDevice(&dev);
   ID3D11DeviceContext* ctx = nullptr;
@@ -489,7 +525,7 @@ void RestoreEyeHistory(int eye) {
 }
 
 void SaveEyeHistory(int eye) {
-  if (!g_historyEnabled || !g_historyTarget) return;
+  if (g_historyMode != 1 || !g_historyTarget) return;
   ID3D11Device* dev = nullptr;
   g_historyTarget->GetDevice(&dev);
   if (!g_history[eye & 1]) {
@@ -501,7 +537,7 @@ void SaveEyeHistory(int eye) {
     d.Usage = D3D11_USAGE_DEFAULT;
     if (FAILED(dev->CreateTexture2D(&d, nullptr, &g_history[eye & 1]))) {
       Log("depth history: could not create texture");
-      g_historyEnabled = false;
+      g_historyMode = 0;
       dev->Release();
       return;
     }
@@ -513,8 +549,8 @@ void SaveEyeHistory(int eye) {
   dev->Release();
 }
 
-void SetEyeHistoryEnabled(bool on) { g_historyEnabled = on; }
-bool EyeHistoryEnabled() { return g_historyEnabled; }
+void SetDepthHistoryMode(int mode) { g_historyMode = mode; }
+int DepthHistoryMode() { return g_historyMode; }
 
 int InFlight() { return g_inFlight.load(); }
 
@@ -526,6 +562,7 @@ void Shutdown() {
   SafeRelease(g_depthTex);
   SafeRelease(g_history[0]);
   SafeRelease(g_history[1]);
+  SafeRelease(g_historyDsv);
   g_historyTarget = nullptr;
   SafeRelease(g_depthSrv);
   SafeRelease(g_rtv);
