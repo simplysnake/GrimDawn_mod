@@ -31,6 +31,14 @@ struct Settings {
   float hudWidth = 0.9f;        // metres wide (the panel covers the whole game screen)
   float hudDown = 0.125f;       // metres below eye level
   float hudTiltDeg = 12.0f;     // tilted back so it faces up towards you
+  float hudBrightness = 1.0f;   // HUD colour multiplier
+  float hudOpacity = 1.0f;      // HUD overall opacity
+  bool hudAutoDim = true;       // dim the HUD as the scene gets brighter (daylight)
+  float hudAutoStrength = 0.5f; // how much darker in full daylight (0.5 = half brightness)
+  float hudDimFrom = 0.10f;     // scene brightness where dimming starts (night ~0.05)
+  float hudDimTo = 0.45f;       // ... and where it reaches full strength (daylight ~0.4)
+  float hudHalo = 0.5f;         // dark halo behind HUD elements (0 = off)
+  float hudHaloRadius = 3.0f;   // halo size in pixels
   bool swapEyeOrder = false;     // render the right eye first (diagnostic)
   bool keepRunningUnfocused = true;  // don't pause when the game window loses focus
   bool bench = false;           // render stereo even while the headset is asleep (for profiling)

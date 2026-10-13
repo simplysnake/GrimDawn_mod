@@ -46,6 +46,9 @@ Log: `%LOCALAPPDATA%\gdvr\gdvr.log`
   `far_plane` (default 70), `mask`, `mask_inner`/`mask_outer` (fade distances from the player, default 45/62),
   `mask_depth_start`, `mask_strength`, `mask_debug`, `mask_depth_pick`, `bench` (stereo while the headset sleeps).
   HUD panel: `hud`, `hud_distance`, `hud_width`, `hud_down`, `hud_tilt` (metres / degrees).
+  HUD look: `hud_brightness`, `hud_opacity`, `hud_halo` (dark outline strength, 0 = off), `hud_halo_radius` (px),
+  `hud_auto_dim` (dim in daylight), `hud_auto_strength` (0.5 = half brightness in full daylight),
+  `hud_dim_from` / `hud_dim_to` (scene brightness range; the log prints the measured value every 5 s).
 - **Controllers**: VR controllers act as a virtual gamepad (merged with any real gamepad) through the game's own
   gamepad mode, so turn on *Gamepad Support* in the game's options. Default Index layout: left stick move,
   right stick = right stick, right A/B = A/B, left A/B = X/Y, grips = bumpers, triggers = triggers, stick clicks,

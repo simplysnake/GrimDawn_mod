@@ -34,7 +34,19 @@ bool Apply(IDXGISwapChain* swapChain, const Params& p);
 // HUD pass: makes every visible HUD pixel opaque enough to show (alpha >= brightness), since some
 // HUD elements are drawn without writing alpha. The HUD was drawn over transparent black, so its
 // colours are already premultiplied. Works in place on the back buffer.
-bool FixHudAlpha(IDXGISwapChain* swapChain);
+struct HudLook {
+  float brightness = 1.0f;  // colour multiplier
+  float opacity = 1.0f;     // overall opacity
+  float halo = 0.0f;        // strength of the dark halo behind HUD elements (0 = off)
+  float haloRadius = 3.0f;  // halo size in pixels
+};
+bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look);
+
+// Measures the average brightness of the current back buffer (an eye image) on the GPU; the
+// result arrives a few frames later. Call once per frame after an eye is rendered.
+void MeasureBrightness(IDXGISwapChain* swapChain);
+// Latest average brightness of the scene, 0..1 (gamma space), or -1 if not measured yet.
+float SceneBrightness();
 
 // ---- Per-eye depth history ---------------------------------------------------------------
 // The engine's geometry pass samples a copy of the PREVIOUS render's depth (soft blending of

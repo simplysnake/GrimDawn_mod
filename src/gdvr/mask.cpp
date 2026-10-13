@@ -65,6 +65,7 @@ cbuffer Params : register(b0) {
   float4 target;
   float4 fade;    // x inner, y outer (horizontal distance), z/w far-plane fade start/end (view depth)
   float4 color;   // a = strength
+  float4 hud;     // HUD pass: x brightness, y opacity, z halo strength, w halo radius (px)
 };
 Texture2D<float> depthTex : register(t0);
 Texture2D<float4> hudTex : register(t0);
@@ -96,14 +97,28 @@ float4 PS(VSOut i) : SV_Target {
   return float4(color.rgb, a * color.a);
 }
 
+float Coverage(float4 c) { return max(c.a, max(c.r, max(c.g, c.b))); }
+
 float4 PSHud(VSOut i) : SV_Target {
-  float4 c = hudTex.Load(int3(i.pos.xy, 0));
-  return float4(c.rgb, max(c.a, max(c.r, max(c.g, c.b))));
+  int2 p = int2(i.pos.xy);
+  float4 c = hudTex.Load(int3(p, 0));
+  float a = Coverage(c);  // some HUD elements don't write alpha; colours are premultiplied over black
+  // Soft dark halo: coverage of the neighbourhood (two rings), drawn as black behind the HUD.
+  float halo = 0;
+  if (hud.z > 0) {
+    [unroll] for (int k = 0; k < 8; ++k) {
+      float2 dir = float2(cos(k * 0.7853982), sin(k * 0.7853982));
+      halo = max(halo, Coverage(hudTex.Load(int3(p + int2(round(dir * hud.w)), 0))));
+      halo = max(halo, Coverage(hudTex.Load(int3(p + int2(round(dir * hud.w * 0.5)), 0))));
+    }
+    halo *= hud.z;
+  }
+  return float4(c.rgb * hud.x * hud.y, max(a, halo) * hud.y);
 }
 )";
 
 struct alignas(16) Constants {
-  float right[4], up[4], fwd[4], origin[4], target[4], fade[4], color[4];
+  float right[4], up[4], fwd[4], origin[4], target[4], fade[4], color[4], hud[4];
 };
 
 template <typename T>
@@ -324,7 +339,91 @@ bool EnsureDeviceAndRtv(ID3D11Texture2D* bb) {
   return true;
 }
 
-bool FixHudAlpha(IDXGISwapChain* swapChain) {
+// ---- Scene brightness: eye image -> mip chain -> 1x1, read back a few frames later ----------
+ID3D11Texture2D* g_lumTex = nullptr;
+ID3D11ShaderResourceView* g_lumSrv = nullptr;
+UINT g_lumMips = 0;
+constexpr int kLumSlots = 4;
+ID3D11Texture2D* g_lumStaging[kLumSlots] = {};
+bool g_lumPending[kLumSlots] = {};
+int g_lumCalls = 0;
+std::atomic<float> g_sceneLum{-1.0f};
+
+void MeasureBrightness(IDXGISwapChain* swapChain) {
+  if (!g_capturingAllowed || g_failed || !swapChain) return;
+  if (g_lumCalls++ % 4) return;  // every 4th frame is plenty
+  ID3D11Texture2D* bb = nullptr;
+  if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) return;
+  if (!EnsureDeviceAndRtv(bb)) {
+    bb->Release();
+    return;
+  }
+  D3D11_TEXTURE2D_DESC bbDesc;
+  bb->GetDesc(&bbDesc);
+  if (g_lumTex) {
+    D3D11_TEXTURE2D_DESC d;
+    g_lumTex->GetDesc(&d);
+    if (d.Width != bbDesc.Width || d.Height != bbDesc.Height || d.Format != bbDesc.Format) {
+      SafeRelease(g_lumSrv);
+      SafeRelease(g_lumTex);
+      for (auto*& s : g_lumStaging) SafeRelease(s);
+    }
+  }
+  if (!g_lumTex) {
+    D3D11_TEXTURE2D_DESC d = bbDesc;
+    d.MipLevels = 0;  // full chain down to 1x1
+    d.Usage = D3D11_USAGE_DEFAULT;
+    d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    d.CPUAccessFlags = 0;
+    d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+    D3D11_TEXTURE2D_DESC sd = bbDesc;
+    sd.Width = sd.Height = 1;
+    sd.MipLevels = 1;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MiscFlags = 0;
+    bool ok = SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &g_lumTex)) &&
+              SUCCEEDED(g_device->CreateShaderResourceView(g_lumTex, nullptr, &g_lumSrv));
+    for (auto*& s : g_lumStaging) ok = ok && SUCCEEDED(g_device->CreateTexture2D(&sd, nullptr, &s));
+    if (!ok) {
+      Log("hud: brightness meter unavailable");
+      SafeRelease(g_lumSrv);
+      SafeRelease(g_lumTex);
+      for (auto*& s : g_lumStaging) SafeRelease(s);
+      bb->Release();
+      return;
+    }
+    g_lumTex->GetDesc(&d);
+    g_lumMips = d.MipLevels;
+  }
+  ID3D11DeviceContext* ctx = nullptr;
+  g_device->GetImmediateContext(&ctx);
+  const int slot = (g_lumCalls / 4) % kLumSlots;
+  // Read the oldest pending result (no stall: skip if the GPU isn't done yet).
+  const int read = (slot + 1) % kLumSlots;
+  if (g_lumPending[read]) {
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (ctx->Map(g_lumStaging[read], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m) == S_OK) {
+      const auto* px = static_cast<const uint8_t*>(m.pData);
+      const bool bgra = bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM || bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+      const float r = (bgra ? px[2] : px[0]) / 255.0f, g = px[1] / 255.0f, b = (bgra ? px[0] : px[2]) / 255.0f;
+      g_sceneLum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+      ctx->Unmap(g_lumStaging[read], 0);
+      g_lumPending[read] = false;
+    }
+  }
+  ctx->CopySubresourceRegion(g_lumTex, 0, 0, 0, 0, bb, 0, nullptr);
+  ctx->GenerateMips(g_lumSrv);
+  ctx->CopySubresourceRegion(g_lumStaging[slot], 0, 0, 0, 0, g_lumTex, g_lumMips - 1, nullptr);
+  g_lumPending[slot] = true;
+  ctx->Release();
+  bb->Release();
+}
+
+float SceneBrightness() { return g_sceneLum.load(); }
+
+bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look) {
   if (!g_capturingAllowed || g_failed || !g_origOMSetRenderTargets || !swapChain) return false;
   ID3D11Texture2D* bb = nullptr;
   if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) return false;
@@ -355,6 +454,16 @@ bool FixHudAlpha(IDXGISwapChain* swapChain) {
     ID3D11DeviceContext* ctx = nullptr;
     g_device->GetImmediateContext(&ctx);
     ctx->CopyResource(g_hudCopy, bb);
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+      Constants& c = *static_cast<Constants*>(mapped.pData);
+      std::memset(&c, 0, sizeof(c));
+      c.hud[0] = look.brightness;
+      c.hud[1] = look.opacity;
+      c.hud[2] = look.halo;
+      c.hud[3] = look.haloRadius;
+      ctx->Unmap(g_cb, 0);
+    }
     StateBackup backup;
     backup.Save(ctx);
     D3D11_VIEWPORT vp{0, 0, float(bbDesc.Width), float(bbDesc.Height), 0, 1};
@@ -364,6 +473,7 @@ bool FixHudAlpha(IDXGISwapChain* swapChain) {
     ctx->OMSetDepthStencilState(g_depthState, 0);
     g_origOMSetRenderTargets(ctx, 1, &g_rtv, nullptr);
     ctx->PSSetShaderResources(0, 1, &g_hudCopySrv);
+    ctx->PSSetConstantBuffers(0, 1, &g_cb);
     ctx->PSSetShader(g_hudPs, nullptr, 0);
     ctx->VSSetShader(g_vs, nullptr, 0);
     ctx->GSSetShader(nullptr, nullptr, 0);
@@ -569,6 +679,11 @@ void Shutdown() {
   SafeRelease(g_vs);
   SafeRelease(g_ps);
   SafeRelease(g_hudPs);
+  SafeRelease(g_lumSrv);
+  SafeRelease(g_lumTex);
+  for (auto*& s : g_lumStaging) SafeRelease(s);
+  g_lumMips = 0;
+  g_sceneLum = -1.0f;
   SafeRelease(g_hudCopySrv);
   SafeRelease(g_hudCopy);
   SafeRelease(g_cb);

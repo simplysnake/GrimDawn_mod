@@ -300,6 +300,33 @@ void PollEvents() {
   }
 }
 
+// HUD look for this frame: user brightness/opacity, dimmed as the scene gets brighter.
+float g_hudLum = -1.0f;      // smoothed scene brightness
+float g_hudAutoFactor = 1.0f;
+
+mask::HudLook CurrentHudLook() {
+  const float lum = mask::SceneBrightness();
+  if (lum >= 0) g_hudLum = g_hudLum < 0 ? lum : g_hudLum + (lum - g_hudLum) * 0.04f;  // ~0.5 s at 50 fps
+  g_hudAutoFactor = 1.0f;
+  if (g_settings.hudAutoDim && g_hudLum >= 0) {
+    const float span = std::max(0.001f, g_settings.hudDimTo - g_settings.hudDimFrom);
+    float t = std::clamp((g_hudLum - g_settings.hudDimFrom) / span, 0.0f, 1.0f);
+    t = t * t * (3 - 2 * t);  // smoothstep
+    g_hudAutoFactor = 1.0f - g_settings.hudAutoStrength * t;
+  }
+  static ULONGLONG lastLog = 0;
+  if (GetTickCount64() - lastLog > 5000) {
+    lastLog = GetTickCount64();
+    Log("hud: scene brightness %.3f -> auto dim x%.2f", g_hudLum, g_hudAutoFactor);
+  }
+  mask::HudLook look;
+  look.brightness = g_settings.hudBrightness * g_hudAutoFactor;
+  look.opacity = g_settings.hudOpacity;
+  look.halo = g_settings.hudHalo;
+  look.haloRadius = g_settings.hudHaloRadius;
+  return look;
+}
+
 // Ends the frame begun by the previous OnPresent, submitting whatever was captured for it.
 void EndFrame() {
   XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -326,7 +353,7 @@ void EndFrame() {
 
       // HUD: the game drew only its UI onto the cleared back buffer; show it on a floating panel.
       if (g_settings.hud && g_hudPrepared) {
-        mask::FixHudAlpha(g_gameSwapChain);
+        mask::FixHudAlpha(g_gameSwapChain, CurrentHudLook());
         if (CaptureBackBuffer(g_hudChain)) {
           const float tilt = -g_settings.hudTiltDeg * 3.14159265f / 180.0f;
           const Quat pitch{std::sin(tilt * 0.5f), 0, 0, std::cos(tilt * 0.5f)};
@@ -587,6 +614,7 @@ void CaptureEye(int eye, float tanHalfX, float tanHalfY) {
     DumpBackBuffer(eye);
     g_dumpEyes &= ~(1 << eye);
   }
+  if (eye == 0 && g_settings.hudAutoDim) mask::MeasureBrightness(g_gameSwapChain);
   g_eyeCaptured[eye] = CaptureBackBuffer(g_eyeChains[eye]);
   g_eyeTan[eye][0] = tanHalfX;
   g_eyeTan[eye][1] = tanHalfY;
@@ -625,6 +653,8 @@ void DrawDebugUI() {
   ImGui::Text("Eyes captured: %d %d   tan(half fov) L %.3f/%.3f  R %.3f/%.3f", int(g_eyeCaptured[0]),
               int(g_eyeCaptured[1]), g_eyeTan[0][0], g_eyeTan[0][1], g_eyeTan[1][0], g_eyeTan[1][1]);
   ImGui::Text("Eye L rel pos %.3f %.3f %.3f", g_eyeRel[0].position.x, g_eyeRel[0].position.y, g_eyeRel[0].position.z);
+  ImGui::Text("HUD: scene brightness %.2f, auto dim x%.2f, brightness %.2f, halo %.2f", g_hudLum, g_hudAutoFactor,
+              g_settings.hudBrightness, g_settings.hudHalo);
   ImGui::Text("Scale %.1f  FOV %.0f  level=%d  frustum=%d", g_settings.worldScale, g_settings.fovDeg,
               int(g_settings.levelHorizon), int(g_settings.recomputeFrustum));
 }
