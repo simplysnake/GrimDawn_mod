@@ -458,6 +458,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     if (pass == 0) perf::Mark(perf::kEye0Begin);
     const double t0 = NowMs();
     mask::BeginCapture(unsigned(g_vpWidth(viewport)), unsigned(g_vpHeight(viewport)), s.maskDepthPick);
+    mask::RestoreEyeHistory(eye);  // this eye's own previous depth, not the other eye's
     perf::SetCurrentEye(eye);
     d3dtrace::SetEye(eye);
     {
@@ -468,6 +469,13 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
         Log("shared shadow matrix -> %s", g_shareShadowMatrix ? "on" : "off");
       }
       if (pass == 0) f3Was = f3;
+      static bool f1Was = false;
+      const bool f1 = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
+      if (pass == 0 && f1 && !f1Was) {
+        mask::SetEyeHistoryEnabled(!mask::EyeHistoryEnabled());
+        Log("per-eye depth history -> %s", mask::EyeHistoryEnabled() ? "on" : "off");
+      }
+      if (pass == 0) f1Was = f1;
       static bool f2Was = false;
       const bool f2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
       if (pass == 0 && f2 && !f2Was) {
@@ -505,6 +513,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     g_origRender(self, camera, region, viewport, eyeFrustum, flags, flag2, eyeWorldFrustum);
     if (bump) --*bump;
     d3dtrace::SetEye(-1);
+    mask::SaveEyeHistory(eye);
     g_currentPass = -1;
     perf::SetCurrentEye(-1);
     mask::EndCapture();

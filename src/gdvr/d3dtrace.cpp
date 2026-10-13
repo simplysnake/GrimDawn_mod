@@ -5,6 +5,7 @@
 
 #include <MinHook.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <mutex>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "log.h"
+#include "mask.h"
 
 namespace gdvr::d3dtrace {
 
@@ -21,7 +23,8 @@ namespace {
 constexpr int kDrawIndexed = 12, kDraw = 13, kDrawIndexedInstanced = 20, kDrawInstanced = 21,
               kDrawIndexedInstancedIndirect = 39, kDrawInstancedIndirect = 40, kDispatch = 41,
               kClearRenderTargetView = 50, kClearDepthStencilView = 53, kExecuteCommandList = 58,
-              kCopySubresourceRegion = 46, kCopyResource = 47;
+              kCopySubresourceRegion = 46, kCopyResource = 47, kPSSetShaderResources = 8,
+              kVSSetShaderResources = 25;
 
 std::atomic<int> g_inFlight{0};
 std::atomic<bool> g_armed{false};
@@ -106,6 +109,46 @@ ClearDsvFn o_ClearDsv;
 ExecuteFn o_Execute;
 CopyResourceFn o_CopyResource;
 CopySubFn o_CopySub;
+using SetSrvFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11ShaderResourceView* const*);
+SetSrvFn o_PSSetSrv, o_VSSetSrv;
+std::vector<std::string> g_srvSeen[2];  // distinct screen-sized SRVs bound per eye (with segment)
+
+void NoteSrvs(const char* stage, UINT start, UINT n, ID3D11ShaderResourceView* const* v) {
+  if (g_eye < 0 || !v) return;
+  for (UINT i = 0; i < n; ++i) {
+    if (!v[i]) continue;
+    ID3D11Resource* r = nullptr;
+    v[i]->GetResource(&r);
+    ID3D11Texture2D* tex = nullptr;
+    if (r && SUCCEEDED(r->QueryInterface(IID_PPV_ARGS(&tex)))) {
+      D3D11_TEXTURE2D_DESC d;
+      tex->GetDesc(&d);
+      if (d.Width >= 1000 && d.Height >= 600 && d.Width != d.Height) {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "  %s srv slot %u: %ux%u f%d %p (seg %d)", stage, start + i, d.Width, d.Height,
+                 int(d.Format), static_cast<void*>(tex), g_segment.load());
+        std::lock_guard lock(g_mutex);
+        auto& seen = g_srvSeen[g_eye];
+        if (std::find(seen.begin(), seen.end(), std::string(buf)) == seen.end()) {
+          seen.push_back(buf);
+          if (g_eye >= 0) g_lines[g_eye].push_back(buf);
+        }
+      }
+      tex->Release();
+    }
+    if (r) r->Release();
+  }
+}
+void STDMETHODCALLTYPE H_PSSetSrv(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11ShaderResourceView* const* v) {
+  Guard g;
+  NoteSrvs("ps", s, n, v);
+  o_PSSetSrv(c, s, n, v);
+}
+void STDMETHODCALLTYPE H_VSSetSrv(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11ShaderResourceView* const* v) {
+  Guard g;
+  NoteSrvs("vs", s, n, v);
+  o_VSSetSrv(c, s, n, v);
+}
 
 void STDMETHODCALLTYPE H_DrawIndexed(ID3D11DeviceContext* c, UINT a, UINT b, INT d) {
   Guard g; CountDraw(); if (SkipDraw()) return; o_DrawIndexed(c, a, b, d);
@@ -161,6 +204,7 @@ std::string DescribeResource(ID3D11Resource* r) {
 }
 void STDMETHODCALLTYPE H_CopyResource(ID3D11DeviceContext* c, ID3D11Resource* dst, ID3D11Resource* src) {
   Guard g;
+  if (g_renderEye >= 0) mask::OnCopyResource(dst, src);
   if (g_eye >= 0) Record("  copy " + DescribeResource(src) + " -> " + DescribeResource(dst));
   o_CopyResource(c, dst, src);
 }
@@ -209,6 +253,8 @@ void InstallHooks(ID3D11DeviceContext* context) {
   Hook(vt, kExecuteCommandList, reinterpret_cast<void*>(&H_Execute), o_Execute);
   Hook(vt, kCopyResource, reinterpret_cast<void*>(&H_CopyResource), o_CopyResource);
   Hook(vt, kCopySubresourceRegion, reinterpret_cast<void*>(&H_CopySub), o_CopySub);
+  Hook(vt, kPSSetShaderResources, reinterpret_cast<void*>(&H_PSSetSrv), o_PSSetSrv);
+  Hook(vt, kVSSetShaderResources, reinterpret_cast<void*>(&H_VSSetSrv), o_VSSetSrv);
   Log("trace: draw/clear hooks installed");
 }
 
@@ -223,6 +269,8 @@ void SetEye(int eye) {
     if (eye == 0) {
       g_lines[0].clear();
       g_lines[1].clear();
+      g_srvSeen[0].clear();
+      g_srvSeen[1].clear();
     }
     g_draws = 0;
     g_eye = eye;

@@ -50,6 +50,11 @@ ID3D11RenderTargetView* g_rtv = nullptr;
 ID3D11Texture2D* g_rtvTex = nullptr;           // back buffer g_rtv was made for (not owned)
 bool g_failed = false;
 
+// Per-eye depth history (see mask.h)
+ID3D11Texture2D* g_historyTarget = nullptr;   // the engine's depth copy (not owned)
+ID3D11Texture2D* g_history[2] = {};           // our saved copy per eye (owned)
+std::atomic<bool> g_historyEnabled{true};
+
 constexpr char kShader[] = R"(
 cbuffer Params : register(b0) {
   float4 right;   // w = tanX
@@ -450,6 +455,67 @@ bool Apply(IDXGISwapChain* swapChain, const Params& p) {
   return ok;
 }
 
+void OnCopyResource(void* dstPtr, void* srcPtr) {
+  auto* dst = static_cast<ID3D11Resource*>(dstPtr);
+  auto* src = static_cast<ID3D11Resource*>(srcPtr);
+  if (!dst || !src || dst == g_historyTarget) return;
+  ID3D11Texture2D *d = nullptr, *s = nullptr;
+  if (SUCCEEDED(dst->QueryInterface(IID_PPV_ARGS(&d))) && SUCCEEDED(src->QueryInterface(IID_PPV_ARGS(&s)))) {
+    D3D11_TEXTURE2D_DESC dd, sd;
+    d->GetDesc(&dd);
+    s->GetDesc(&sd);
+    // A screen-sized depth copied into another screen-sized depth during an eye render.
+    if (dd.Width == g_wantWidth && dd.Height == g_wantHeight && SrvFormatFor(dd.Format) && sd.Format == dd.Format &&
+        (sd.BindFlags & D3D11_BIND_DEPTH_STENCIL)) {
+      g_historyTarget = d;  // engine-owned; it lives as long as its render targets
+      SafeRelease(g_history[0]);
+      SafeRelease(g_history[1]);
+      Log("depth history: engine depth copy %p (%ux%u f%d)", static_cast<void*>(d), dd.Width, dd.Height, int(dd.Format));
+    }
+  }
+  SafeRelease(d);
+  SafeRelease(s);
+}
+
+void RestoreEyeHistory(int eye) {
+  if (!g_historyEnabled || !g_historyTarget || !g_history[eye & 1]) return;
+  ID3D11Device* dev = nullptr;
+  g_historyTarget->GetDevice(&dev);
+  ID3D11DeviceContext* ctx = nullptr;
+  dev->GetImmediateContext(&ctx);
+  ctx->CopyResource(g_historyTarget, g_history[eye & 1]);
+  ctx->Release();
+  dev->Release();
+}
+
+void SaveEyeHistory(int eye) {
+  if (!g_historyEnabled || !g_historyTarget) return;
+  ID3D11Device* dev = nullptr;
+  g_historyTarget->GetDevice(&dev);
+  if (!g_history[eye & 1]) {
+    D3D11_TEXTURE2D_DESC d;
+    g_historyTarget->GetDesc(&d);
+    d.BindFlags = D3D11_BIND_SHADER_RESOURCE;  // only used as a copy source/destination
+    d.CPUAccessFlags = 0;
+    d.MiscFlags = 0;
+    d.Usage = D3D11_USAGE_DEFAULT;
+    if (FAILED(dev->CreateTexture2D(&d, nullptr, &g_history[eye & 1]))) {
+      Log("depth history: could not create texture");
+      g_historyEnabled = false;
+      dev->Release();
+      return;
+    }
+  }
+  ID3D11DeviceContext* ctx = nullptr;
+  dev->GetImmediateContext(&ctx);
+  ctx->CopyResource(g_history[eye & 1], g_historyTarget);
+  ctx->Release();
+  dev->Release();
+}
+
+void SetEyeHistoryEnabled(bool on) { g_historyEnabled = on; }
+bool EyeHistoryEnabled() { return g_historyEnabled; }
+
 int InFlight() { return g_inFlight.load(); }
 
 void Shutdown() {
@@ -458,6 +524,9 @@ void Shutdown() {
   g_capturing = false;
   g_capturingAllowed = false;
   SafeRelease(g_depthTex);
+  SafeRelease(g_history[0]);
+  SafeRelease(g_history[1]);
+  g_historyTarget = nullptr;
   SafeRelease(g_depthSrv);
   SafeRelease(g_rtv);
   SafeRelease(g_vs);

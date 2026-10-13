@@ -36,6 +36,17 @@ bool Apply(IDXGISwapChain* swapChain, const Params& p);
 // colours are already premultiplied. Works in place on the back buffer.
 bool FixHudAlpha(IDXGISwapChain* swapChain);
 
+// ---- Per-eye depth history ---------------------------------------------------------------
+// The engine's geometry pass samples a copy of the PREVIOUS render's depth (soft blending of
+// grass/rocks/characters into the ground); the copy is refreshed only after the geometry pass.
+// In stereo the previous render is the other eye, which gives misaligned dark edges. These keep
+// one history per eye: restore it before the eye renders, save it afterwards.
+void OnCopyResource(void* dst, void* src);  // called for copies made during an eye render
+void RestoreEyeHistory(int eye);
+void SaveEyeHistory(int eye);
+void SetEyeHistoryEnabled(bool on);
+bool EyeHistoryEnabled();
+
 int InFlight();
 void Shutdown();
 
