@@ -66,6 +66,7 @@ cbuffer Params : register(b0) {
   float4 fade;    // x inner, y outer (horizontal distance), z/w far-plane fade start/end (view depth)
   float4 color;   // a = strength
   float4 hud;     // HUD pass: x brightness, y opacity, z halo strength, w halo radius (px)
+  float4 hud2;    // HUD pass: x alpha boost
 };
 Texture2D<float> depthTex : register(t0);
 Texture2D<float4> hudTex : register(t0);
@@ -97,7 +98,9 @@ float4 PS(VSOut i) : SV_Target {
   return float4(color.rgb, a * color.a);
 }
 
-float Coverage(float4 c) { return max(c.a, max(c.r, max(c.g, c.b))); }
+// Some HUD elements don't write alpha; their colour (premultiplied over black) says how visible they are.
+// The boost makes dark-but-drawn pixels solid instead of see-through (which looked additive).
+float Coverage(float4 c) { return saturate(max(c.a, max(c.r, max(c.g, c.b)) * hud2.x)); }
 
 float4 PSHud(VSOut i) : SV_Target {
   int2 p = int2(i.pos.xy);
@@ -106,10 +109,14 @@ float4 PSHud(VSOut i) : SV_Target {
   // Soft dark halo: coverage of the neighbourhood (two rings), drawn as black behind the HUD.
   float halo = 0;
   if (hud.z > 0) {
-    [unroll] for (int k = 0; k < 8; ++k) {
-      float2 dir = float2(cos(k * 0.7853982), sin(k * 0.7853982));
-      halo = max(halo, Coverage(hudTex.Load(int3(p + int2(round(dir * hud.w)), 0))));
-      halo = max(halo, Coverage(hudTex.Load(int3(p + int2(round(dir * hud.w * 0.5)), 0))));
+    // 12 directions x 3 rings; outer rings count less, so the halo fades softly outwards.
+    [unroll] for (int ring = 1; ring <= 3; ++ring) {
+      float r = hud.w * ring / 3.0;
+      float w = 1.0 - (ring - 1) * 0.3;
+      [unroll] for (int k = 0; k < 12; ++k) {
+        float2 dir = float2(cos(k * 0.5235988), sin(k * 0.5235988));
+        halo = max(halo, w * Coverage(hudTex.Load(int3(p + int2(round(dir * r)), 0))));
+      }
     }
     halo *= hud.z;
   }
@@ -118,7 +125,7 @@ float4 PSHud(VSOut i) : SV_Target {
 )";
 
 struct alignas(16) Constants {
-  float right[4], up[4], fwd[4], origin[4], target[4], fade[4], color[4], hud[4];
+  float right[4], up[4], fwd[4], origin[4], target[4], fade[4], color[4], hud[4], hud2[4];
 };
 
 template <typename T>
@@ -462,6 +469,7 @@ bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look) {
       c.hud[1] = look.opacity;
       c.hud[2] = look.halo;
       c.hud[3] = look.haloRadius;
+      c.hud2[0] = look.alphaBoost;
       ctx->Unmap(g_cb, 0);
     }
     StateBackup backup;

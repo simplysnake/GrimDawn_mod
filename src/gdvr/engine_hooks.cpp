@@ -620,6 +620,8 @@ void PollControlFile() {
   vr.hudDimTo = getFloat(L"hud_dim_to", vr.hudDimTo);
   vr.hudHalo = getFloat(L"hud_halo", vr.hudHalo);
   vr.hudHaloRadius = getFloat(L"hud_halo_radius", vr.hudHaloRadius);
+  vr.hudAlphaBoost = getFloat(L"hud_alpha_boost", vr.hudAlphaBoost);
+  vr.hudForceDaylight = getInt(L"hud_force_daylight", vr.hudForceDaylight) != 0;
   vr.farPlane = getFloat(L"far_plane", vr.farPlane);
   vr.maskEnabled = getInt(L"mask", vr.maskEnabled) != 0;
   vr.maskInner = getFloat(L"mask_inner", vr.maskInner);

@@ -39,6 +39,7 @@ struct HudLook {
   float opacity = 1.0f;     // overall opacity
   float halo = 0.0f;        // strength of the dark halo behind HUD elements (0 = off)
   float haloRadius = 3.0f;  // halo size in pixels
+  float alphaBoost = 1.0f;  // opacity from brightness x this (makes dark HUD parts solid)
 };
 bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look);
 

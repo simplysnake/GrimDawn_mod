@@ -37,8 +37,10 @@ struct Settings {
   float hudAutoStrength = 0.5f; // how much darker in full daylight (0.5 = half brightness)
   float hudDimFrom = 0.10f;     // scene brightness where dimming starts (night ~0.05)
   float hudDimTo = 0.45f;       // ... and where it reaches full strength (daylight ~0.4)
-  float hudHalo = 0.5f;         // dark halo behind HUD elements (0 = off)
-  float hudHaloRadius = 3.0f;   // halo size in pixels
+  float hudHalo = 0.7f;         // dark halo behind HUD elements (0 = off)
+  float hudHaloRadius = 8.0f;   // halo size in pixels (HUD image is 2560 px across the panel)
+  float hudAlphaBoost = 3.0f;   // dark-but-drawn HUD pixels become solid (1 = brightness-only, looks additive)
+  bool hudForceDaylight = false; // preview the full daylight dimming at any time of day
   bool swapEyeOrder = false;     // render the right eye first (diagnostic)
   bool keepRunningUnfocused = true;  // don't pause when the game window loses focus
   bool bench = false;           // render stereo even while the headset is asleep (for profiling)

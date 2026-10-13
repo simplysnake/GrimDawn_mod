@@ -308,9 +308,9 @@ mask::HudLook CurrentHudLook() {
   const float lum = mask::SceneBrightness();
   if (lum >= 0) g_hudLum = g_hudLum < 0 ? lum : g_hudLum + (lum - g_hudLum) * 0.04f;  // ~0.5 s at 50 fps
   g_hudAutoFactor = 1.0f;
-  if (g_settings.hudAutoDim && g_hudLum >= 0) {
+  if (g_settings.hudAutoDim && (g_hudLum >= 0 || g_settings.hudForceDaylight)) {
     const float span = std::max(0.001f, g_settings.hudDimTo - g_settings.hudDimFrom);
-    float t = std::clamp((g_hudLum - g_settings.hudDimFrom) / span, 0.0f, 1.0f);
+    float t = g_settings.hudForceDaylight ? 1.0f : std::clamp((g_hudLum - g_settings.hudDimFrom) / span, 0.0f, 1.0f);
     t = t * t * (3 - 2 * t);  // smoothstep
     g_hudAutoFactor = 1.0f - g_settings.hudAutoStrength * t;
   }
@@ -324,6 +324,7 @@ mask::HudLook CurrentHudLook() {
   look.opacity = g_settings.hudOpacity;
   look.halo = g_settings.hudHalo;
   look.haloRadius = g_settings.hudHaloRadius;
+  look.alphaBoost = g_settings.hudAlphaBoost;
   return look;
 }
 
@@ -653,8 +654,21 @@ void DrawDebugUI() {
   ImGui::Text("Eyes captured: %d %d   tan(half fov) L %.3f/%.3f  R %.3f/%.3f", int(g_eyeCaptured[0]),
               int(g_eyeCaptured[1]), g_eyeTan[0][0], g_eyeTan[0][1], g_eyeTan[1][0], g_eyeTan[1][1]);
   ImGui::Text("Eye L rel pos %.3f %.3f %.3f", g_eyeRel[0].position.x, g_eyeRel[0].position.y, g_eyeRel[0].position.z);
-  ImGui::Text("HUD: scene brightness %.2f, auto dim x%.2f, brightness %.2f, halo %.2f", g_hudLum, g_hudAutoFactor,
-              g_settings.hudBrightness, g_settings.hudHalo);
+  if (ImGui::TreeNodeEx("HUD look", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Text("Scene brightness %.3f  ->  auto dim x%.2f", g_hudLum, g_hudAutoFactor);
+    ImGui::SliderFloat("Brightness", &g_settings.hudBrightness, 0.1f, 1.5f);
+    ImGui::SliderFloat("Opacity", &g_settings.hudOpacity, 0.1f, 1.0f);
+    ImGui::SliderFloat("Solid dark parts (alpha boost)", &g_settings.hudAlphaBoost, 1.0f, 8.0f);
+    ImGui::SliderFloat("Halo strength", &g_settings.hudHalo, 0.0f, 1.0f);
+    ImGui::SliderFloat("Halo size (px)", &g_settings.hudHaloRadius, 1.0f, 24.0f);
+    ImGui::Checkbox("Auto dim in daylight", &g_settings.hudAutoDim);
+    ImGui::SameLine();
+    ImGui::Checkbox("Pretend daylight (preview)", &g_settings.hudForceDaylight);
+    ImGui::SliderFloat("Daylight dim amount", &g_settings.hudAutoStrength, 0.0f, 0.9f);
+    ImGui::SliderFloat("Dim starts at brightness", &g_settings.hudDimFrom, 0.0f, 0.6f);
+    ImGui::SliderFloat("Full dim at brightness", &g_settings.hudDimTo, 0.05f, 0.8f);
+    ImGui::TreePop();
+  }
   ImGui::Text("Scale %.1f  FOV %.0f  level=%d  frustum=%d", g_settings.worldScale, g_settings.fovDeg,
               int(g_settings.levelHorizon), int(g_settings.recomputeFrustum));
 }
