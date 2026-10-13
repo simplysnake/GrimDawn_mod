@@ -614,12 +614,13 @@ void PollControlFile() {
   vr.hudTiltDeg = getFloat(L"hud_tilt", vr.hudTiltDeg);
   vr.hudBrightness = getFloat(L"hud_brightness", vr.hudBrightness);
   vr.hudOpacity = getFloat(L"hud_opacity", vr.hudOpacity);
-  vr.hudAutoDim = getInt(L"hud_auto_dim", vr.hudAutoDim) != 0;
-  vr.hudAutoStrength = getFloat(L"hud_auto_strength", vr.hudAutoStrength);
-  vr.hudDimFrom = getFloat(L"hud_dim_from", vr.hudDimFrom);
-  vr.hudDimTo = getFloat(L"hud_dim_to", vr.hudDimTo);
+  vr.hudDayAdapt = getInt(L"hud_day_adapt", vr.hudDayAdapt) != 0;
   vr.hudHalo = getFloat(L"hud_halo", vr.hudHalo);
   vr.hudHaloRadius = getFloat(L"hud_halo_radius", vr.hudHaloRadius);
+  vr.hudHaloDay = getFloat(L"hud_halo_day", vr.hudHaloDay);
+  vr.hudHaloRadiusDay = getFloat(L"hud_halo_radius_day", vr.hudHaloRadiusDay);
+  vr.hudDayFrom = getFloat(L"hud_day_from", vr.hudDayFrom);
+  vr.hudDayTo = getFloat(L"hud_day_to", vr.hudDayTo);
   vr.hudAlphaBoost = getFloat(L"hud_alpha_boost", vr.hudAlphaBoost);
   vr.hudForceDaylight = getInt(L"hud_force_daylight", vr.hudForceDaylight) != 0;
   vr.farPlane = getFloat(L"far_plane", vr.farPlane);

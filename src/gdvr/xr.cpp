@@ -300,32 +300,80 @@ void PollEvents() {
   }
 }
 
-// HUD look for this frame: user brightness/opacity, dimmed as the scene gets brighter.
-float g_hudLum = -1.0f;      // smoothed scene brightness
-float g_hudAutoFactor = 1.0f;
+// HUD look for this frame: the dark backing behind HUD elements follows scene brightness.
+float g_hudLum = -1.0f;    // smoothed scene brightness
+float g_hudDayAmount = 0;  // 0 = night look, 1 = daylight look
 
 mask::HudLook CurrentHudLook() {
   const float lum = mask::SceneBrightness();
   if (lum >= 0) g_hudLum = g_hudLum < 0 ? lum : g_hudLum + (lum - g_hudLum) * 0.04f;  // ~0.5 s at 50 fps
-  g_hudAutoFactor = 1.0f;
-  if (g_settings.hudAutoDim && (g_hudLum >= 0 || g_settings.hudForceDaylight)) {
-    const float span = std::max(0.001f, g_settings.hudDimTo - g_settings.hudDimFrom);
-    float t = g_settings.hudForceDaylight ? 1.0f : std::clamp((g_hudLum - g_settings.hudDimFrom) / span, 0.0f, 1.0f);
-    t = t * t * (3 - 2 * t);  // smoothstep
-    g_hudAutoFactor = 1.0f - g_settings.hudAutoStrength * t;
+  g_hudDayAmount = 0;
+  if (g_settings.hudForceDaylight) {
+    g_hudDayAmount = 1;
+  } else if (g_settings.hudDayAdapt && g_hudLum >= 0) {
+    const float span = std::max(0.001f, g_settings.hudDayTo - g_settings.hudDayFrom);
+    const float t = std::clamp((g_hudLum - g_settings.hudDayFrom) / span, 0.0f, 1.0f);
+    g_hudDayAmount = t * t * (3 - 2 * t);  // smoothstep
   }
   static ULONGLONG lastLog = 0;
   if (GetTickCount64() - lastLog > 5000) {
     lastLog = GetTickCount64();
-    Log("hud: scene brightness %.3f -> auto dim x%.2f", g_hudLum, g_hudAutoFactor);
+    Log("hud: scene brightness %.3f -> daylight %.2f", g_hudLum, g_hudDayAmount);
   }
+  auto mix = [](float a, float b, float t) { return a + (b - a) * t; };
   mask::HudLook look;
-  look.brightness = g_settings.hudBrightness * g_hudAutoFactor;
+  look.brightness = g_settings.hudBrightness;
   look.opacity = g_settings.hudOpacity;
-  look.halo = g_settings.hudHalo;
-  look.haloRadius = g_settings.hudHaloRadius;
+  look.halo = mix(g_settings.hudHalo, g_settings.hudHaloDay, g_hudDayAmount);
+  look.haloRadius = mix(g_settings.hudHaloRadius, g_settings.hudHaloRadiusDay, g_hudDayAmount);
   look.alphaBoost = g_settings.hudAlphaBoost;
   return look;
+}
+
+// Writes every persistent setting to control.ini [vr]. Caller holds g_mutex.
+bool SaveSettingsLocked() {
+  wchar_t base[MAX_PATH];
+  if (!GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH)) return false;
+  const std::wstring path = std::wstring(base) + L"\\gdvr\\control.ini";
+  const Settings& s = g_settings;
+  bool ok = true;
+  auto put = [&](const wchar_t* key, double v) {
+    wchar_t buf[64];
+    swprintf_s(buf, L"%g", v);
+    ok &= WritePrivateProfileStringW(L"vr", key, buf, path.c_str()) != 0;
+  };
+  put(L"mode", int(s.mode));
+  put(L"world_scale", s.worldScale);
+  put(L"fov_deg", s.fovDeg);
+  put(L"level_horizon", s.levelHorizon);
+  put(L"recompute_frustum", s.recomputeFrustum);
+  put(L"far_plane", s.farPlane);
+  put(L"screen_distance", s.screenDistance);
+  put(L"screen_width", s.screenWidth);
+  put(L"mask", s.maskEnabled);
+  put(L"mask_inner", s.maskInner);
+  put(L"mask_outer", s.maskOuter);
+  put(L"mask_depth_start", s.maskDepthStart);
+  put(L"mask_strength", s.maskStrength);
+  put(L"mask_depth_pick", s.maskDepthPick);
+  put(L"hud", s.hud);
+  put(L"hud_distance", s.hudDistance);
+  put(L"hud_width", s.hudWidth);
+  put(L"hud_down", s.hudDown);
+  put(L"hud_tilt", s.hudTiltDeg);
+  put(L"hud_brightness", s.hudBrightness);
+  put(L"hud_opacity", s.hudOpacity);
+  put(L"hud_alpha_boost", s.hudAlphaBoost);
+  put(L"hud_day_adapt", s.hudDayAdapt);
+  put(L"hud_halo", s.hudHalo);
+  put(L"hud_halo_radius", s.hudHaloRadius);
+  put(L"hud_halo_day", s.hudHaloDay);
+  put(L"hud_halo_radius_day", s.hudHaloRadiusDay);
+  put(L"hud_day_from", s.hudDayFrom);
+  put(L"hud_day_to", s.hudDayTo);
+  put(L"keep_running_unfocused", s.keepRunningUnfocused);
+  Log(ok ? "settings saved to control.ini" : "saving settings to control.ini failed");
+  return ok;
 }
 
 // Ends the frame begun by the previous OnPresent, submitting whatever was captured for it.
@@ -443,6 +491,11 @@ void BeginFrame() {
 
 Settings& GetSettings() { return g_settings; }
 void RequestRecenter() { g_recenterRequested = true; }
+
+bool SaveSettings() {
+  std::lock_guard lock(g_mutex);
+  return SaveSettingsLocked();
+}
 
 void OnPresent(IDXGISwapChain* swapChain) {
   std::lock_guard lock(g_mutex);
@@ -615,7 +668,7 @@ void CaptureEye(int eye, float tanHalfX, float tanHalfY) {
     DumpBackBuffer(eye);
     g_dumpEyes &= ~(1 << eye);
   }
-  if (eye == 0 && g_settings.hudAutoDim) mask::MeasureBrightness(g_gameSwapChain);
+  if (eye == 0 && g_settings.hudDayAdapt) mask::MeasureBrightness(g_gameSwapChain);
   g_eyeCaptured[eye] = CaptureBackBuffer(g_eyeChains[eye]);
   g_eyeTan[eye][0] = tanHalfX;
   g_eyeTan[eye][1] = tanHalfY;
@@ -655,19 +708,41 @@ void DrawDebugUI() {
               int(g_eyeCaptured[1]), g_eyeTan[0][0], g_eyeTan[0][1], g_eyeTan[1][0], g_eyeTan[1][1]);
   ImGui::Text("Eye L rel pos %.3f %.3f %.3f", g_eyeRel[0].position.x, g_eyeRel[0].position.y, g_eyeRel[0].position.z);
   if (ImGui::TreeNodeEx("HUD look", ImGuiTreeNodeFlags_DefaultOpen)) {
-    ImGui::Text("Scene brightness %.3f  ->  auto dim x%.2f", g_hudLum, g_hudAutoFactor);
+    ImGui::Text("Scene brightness %.3f  ->  daylight %.2f", g_hudLum, g_hudDayAmount);
     ImGui::SliderFloat("Brightness", &g_settings.hudBrightness, 0.1f, 1.5f);
     ImGui::SliderFloat("Opacity", &g_settings.hudOpacity, 0.1f, 1.0f);
     ImGui::SliderFloat("Solid dark parts (alpha boost)", &g_settings.hudAlphaBoost, 1.0f, 8.0f);
-    ImGui::SliderFloat("Halo strength", &g_settings.hudHalo, 0.0f, 1.0f);
-    ImGui::SliderFloat("Halo size (px)", &g_settings.hudHaloRadius, 1.0f, 24.0f);
-    ImGui::Checkbox("Auto dim in daylight", &g_settings.hudAutoDim);
+    ImGui::Checkbox("Stronger backing in daylight", &g_settings.hudDayAdapt);
     ImGui::SameLine();
-    ImGui::Checkbox("Pretend daylight (preview)", &g_settings.hudForceDaylight);
-    ImGui::SliderFloat("Daylight dim amount", &g_settings.hudAutoStrength, 0.0f, 0.9f);
-    ImGui::SliderFloat("Dim starts at brightness", &g_settings.hudDimFrom, 0.0f, 0.6f);
-    ImGui::SliderFloat("Full dim at brightness", &g_settings.hudDimTo, 0.05f, 0.8f);
+    ImGui::Checkbox("Preview daylight", &g_settings.hudForceDaylight);
+    ImGui::SliderFloat("Night halo strength", &g_settings.hudHalo, 0.0f, 1.0f);
+    ImGui::SliderFloat("Night halo size (px)", &g_settings.hudHaloRadius, 1.0f, 32.0f);
+    ImGui::SliderFloat("Day halo strength", &g_settings.hudHaloDay, 0.0f, 1.0f);
+    ImGui::SliderFloat("Day halo size (px)", &g_settings.hudHaloRadiusDay, 1.0f, 32.0f);
+    ImGui::SliderFloat("Night below brightness", &g_settings.hudDayFrom, 0.0f, 0.6f);
+    ImGui::SliderFloat("Full day above brightness", &g_settings.hudDayTo, 0.05f, 0.8f);
+    if (ImGui::Button("Reset HUD look")) {
+      const Settings d;
+      g_settings.hudBrightness = d.hudBrightness;
+      g_settings.hudOpacity = d.hudOpacity;
+      g_settings.hudAlphaBoost = d.hudAlphaBoost;
+      g_settings.hudDayAdapt = d.hudDayAdapt;
+      g_settings.hudHalo = d.hudHalo;
+      g_settings.hudHaloRadius = d.hudHaloRadius;
+      g_settings.hudHaloDay = d.hudHaloDay;
+      g_settings.hudHaloRadiusDay = d.hudHaloRadiusDay;
+      g_settings.hudDayFrom = d.hudDayFrom;
+      g_settings.hudDayTo = d.hudDayTo;
+    }
     ImGui::TreePop();
+  }
+  static double savedAt = -10;
+  if (ImGui::Button("Save settings")) {
+    if (SaveSettingsLocked()) savedAt = ImGui::GetTime();
+  }
+  if (ImGui::GetTime() - savedAt < 3) {
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Saved to control.ini");
   }
   ImGui::Text("Scale %.1f  FOV %.0f  level=%d  frustum=%d", g_settings.worldScale, g_settings.fovDeg,
               int(g_settings.levelHorizon), int(g_settings.recomputeFrustum));

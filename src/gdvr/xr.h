@@ -33,14 +33,17 @@ struct Settings {
   float hudTiltDeg = 12.0f;     // tilted back so it faces up towards you
   float hudBrightness = 1.0f;   // HUD colour multiplier
   float hudOpacity = 1.0f;      // HUD overall opacity
-  bool hudAutoDim = true;       // dim the HUD as the scene gets brighter (daylight)
-  float hudAutoStrength = 0.5f; // how much darker in full daylight (0.5 = half brightness)
-  float hudDimFrom = 0.10f;     // scene brightness where dimming starts (night ~0.05)
-  float hudDimTo = 0.45f;       // ... and where it reaches full strength (daylight ~0.4)
-  float hudHalo = 0.7f;         // dark halo behind HUD elements (0 = off)
-  float hudHaloRadius = 8.0f;   // halo size in pixels (HUD image is 2560 px across the panel)
+  // Dark backing (halo) behind HUD elements, stronger and wider as the scene gets brighter, so the
+  // HUD stays readable in daylight. The HUD itself keeps its brightness.
+  bool hudDayAdapt = true;        // blend the halo from its night to its day values with scene brightness
+  float hudHalo = 0.4f;           // night: halo strength (0 = off)
+  float hudHaloRadius = 6.0f;     // night: halo size in pixels (HUD image is 2560 px across the panel)
+  float hudHaloDay = 0.9f;        // daylight: halo strength
+  float hudHaloRadiusDay = 14.0f; // daylight: halo size in pixels
+  float hudDayFrom = 0.10f;       // scene brightness that counts as night (measured ~0.08-0.14 at night)
+  float hudDayTo = 0.28f;         // ... and as full daylight (measured ~0.24-0.32 in daylight)
   float hudAlphaBoost = 3.0f;   // dark-but-drawn HUD pixels become solid (1 = brightness-only, looks additive)
-  bool hudForceDaylight = false; // preview the full daylight dimming at any time of day
+  bool hudForceDaylight = false; // preview the daylight look at any time of day (not saved)
   bool swapEyeOrder = false;     // render the right eye first (diagnostic)
   bool keepRunningUnfocused = true;  // don't pause when the game window loses focus
   bool bench = false;           // render stereo even while the headset is asleep (for profiling)
@@ -48,6 +51,9 @@ struct Settings {
 
 Settings& GetSettings();
 void RequestRecenter();
+
+// Writes the current settings to %LOCALAPPDATA%\gdvr\control.ini (section [vr]).
+bool SaveSettings();
 
 // Called from the Present hook, before the game's Present: submits the previous frame and
 // begins the next one (this is where OpenXR paces the game).
