@@ -60,6 +60,8 @@ gd::CameraGetFrustumFn g_getFrustum = nullptr;
 gd::RendererGetCameraTargetFn g_cameraTarget = nullptr;
 gd::WorldFrustumInitializeFn g_wfInit = nullptr;
 gd::WorldFrustumGetRegionFn g_wfRegion = nullptr;
+
+
 bool g_eyeWorldFrustum = false;  // F4 toggles (on culls leaves/walls wrongly - frustum space mismatch): per-eye world frustum (shadows / culling follow the eye)
 
 std::atomic<int> g_inFlight{0};
@@ -81,6 +83,41 @@ struct InFlightGuard {
   InFlightGuard() { ++g_inFlight; }
   ~InFlightGuard() { --g_inFlight; }
 };
+
+// Experiment: keep grass alive (skip DestroyGrass) to test whether grass churn causes the black
+// blades in the second eye. F2 toggles. Leaks grass memory over time if left on while travelling.
+gd::GrassDestroyFn g_origGrassDestroy = nullptr;
+std::atomic<bool> g_keepGrass{false};
+std::atomic<int> g_grassDestroySkipped{0};
+
+void HookGrassDestroy(void* self, void* terrain) {
+  ++g_inFlight;
+  if (g_keepGrass && xr::GetSettings().mode == xr::Mode::Stereo) {
+    ++g_grassDestroySkipped;
+  } else {
+    g_origGrassDestroy(self, terrain);
+  }
+  --g_inFlight;
+}
+
+gd::RendererLiSPSMFn g_origLiSPSM = nullptr;
+bool g_shareShadowMatrix = true;  // F3 toggles: second eye reuses the first eye's shadow matrix
+int g_currentPass = -1;           // which stereo pass is rendering (-1 = not in stereo)
+float g_shadowMatrix[16];
+bool g_haveShadowMatrix = false;
+
+void HookLiSPSM(const gd::GraphicsMTRenderer* self, const gd::Camera* camera, const void* lightDir,
+                const gd::Frustum* frustum, gd::Mat4* out) {
+  ++g_inFlight;
+  g_origLiSPSM(self, camera, lightDir, frustum, out);
+  if (g_currentPass == 0) {
+    std::memcpy(g_shadowMatrix, out, sizeof(g_shadowMatrix));
+    g_haveShadowMatrix = true;
+  } else if (g_currentPass == 1 && g_shareShadowMatrix && g_haveShadowMatrix) {
+    std::memcpy(out, g_shadowMatrix, sizeof(g_shadowMatrix));
+  }
+  --g_inFlight;
+}
 
 double NowMs() {
   static LARGE_INTEGER freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f; }();
@@ -309,6 +346,14 @@ bool g_bumpEnabled = false;  // the frame-counter bump did not fix the right eye
 constexpr size_t kReplayOffset = 0x1E0, kReplaySize = 16;
 bool g_replayEnabled = true;  // F5 toggles, for A/B comparison in the headset
 
+// Extra renderer ranges replayed the same way (offset, size), from control.ini replay_extra,
+// e.g. "38:8,814:4" (hex). Used to test other state the first render consumes.
+struct ReplayRange {
+  size_t offset, size;
+};
+std::vector<ReplayRange> g_replayExtra;
+uint8_t g_replayExtraBytes[256];
+
 // Engine frame counter (found with diag_counter): bumping it for the second eye makes the engine
 // run its once-per-frame post-processing (FXAA, glow) for that eye too.
 constexpr char kDefaultBump[] = "Engine.dll+0x41C574";
@@ -415,6 +460,25 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     mask::BeginCapture(unsigned(g_vpWidth(viewport)), unsigned(g_vpHeight(viewport)), s.maskDepthPick);
     perf::SetCurrentEye(eye);
     d3dtrace::SetEye(eye);
+    {
+      static bool f3Was = false;
+      const bool f3 = (GetAsyncKeyState(VK_F3) & 0x8000) != 0;
+      if (pass == 0 && f3 && !f3Was) {
+        g_shareShadowMatrix = !g_shareShadowMatrix;
+        Log("shared shadow matrix -> %s", g_shareShadowMatrix ? "on" : "off");
+      }
+      if (pass == 0) f3Was = f3;
+      static bool f2Was = false;
+      const bool f2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
+      if (pass == 0 && f2 && !f2Was) {
+        g_keepGrass = !g_keepGrass;
+        Log("keep grass (skip DestroyGrass) -> %s (skipped so far %d)", g_keepGrass ? "on" : "off",
+            g_grassDestroySkipped.load());
+      }
+      if (pass == 0) f2Was = f2;
+    }
+    g_currentPass = pass;
+    if (pass == 0) g_haveShadowMatrix = false;
     static bool f5Was = false;
     const bool f5 = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
     if (pass == 0 && f5 && !f5Was) {
@@ -424,6 +488,16 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     auto* replay = reinterpret_cast<uint8_t*>(self) + kReplayOffset;
     if (pass == 0) std::memcpy(replayBytes, replay, kReplaySize);
     else if (g_replayEnabled) std::memcpy(replay, replayBytes, kReplaySize);
+    {
+      size_t at = 0;
+      for (const ReplayRange& r : g_replayExtra) {
+        if (at + r.size > sizeof(g_replayExtraBytes)) break;
+        auto* p = reinterpret_cast<uint8_t*>(self) + r.offset;
+        if (pass == 0) std::memcpy(g_replayExtraBytes + at, p, r.size);
+        else std::memcpy(p, g_replayExtraBytes + at, r.size);
+        at += r.size;
+      }
+    }
     if (pass == 0) f5Was = f5;
     if (!g_bumpAddress) g_bumpAddress = ResolveBump(kDefaultBump);
     uint32_t* bump = pass == 1 && g_bumpEnabled ? g_bumpAddress : nullptr;
@@ -431,6 +505,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     g_origRender(self, camera, region, viewport, eyeFrustum, flags, flag2, eyeWorldFrustum);
     if (bump) --*bump;
     d3dtrace::SetEye(-1);
+    g_currentPass = -1;
     perf::SetCurrentEye(-1);
     mask::EndCapture();
     perf::AddEyeCpu(eye, NowMs() - t0);
@@ -580,7 +655,22 @@ void PollControlFile() {
   vr.screenDistance = getFloat(L"screen_distance", vr.screenDistance);
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
   vr.bench = getInt(L"bench", vr.bench) != 0;
+  g_keepGrass = getInt(L"keep_grass", g_keepGrass) != 0;
   vr.swapEyeOrder = getInt(L"swap_eye_order", vr.swapEyeOrder) != 0;
+  {
+    wchar_t buf[256];
+    GetPrivateProfileStringW(L"vr", L"replay_extra", L"", buf, 256, path.c_str());
+    g_replayExtra.clear();
+    for (wchar_t* tok = buf; tok && *tok;) {
+      wchar_t* end = nullptr;
+      const size_t off = size_t(wcstoull(tok, &end, 16));
+      size_t size = 4;
+      if (end && *end == L':') size = size_t(wcstoull(end + 1, &end, 16));
+      if (off < 0x4000 && size && size <= 64) g_replayExtra.push_back({off, size});
+      tok = end && *end == L',' ? end + 1 : nullptr;
+    }
+    if (!g_replayExtra.empty()) Log("replay_extra: %zu ranges", g_replayExtra.size());
+  }
   static int lastGlobal = 0;
   if (int t = getInt(L"diag_gconsumed", lastGlobal); t != lastGlobal) {
     lastGlobal = t;
@@ -678,6 +768,13 @@ bool Install() {
   ok &= Resolve(engine, gd::kCameraGetProjection, g_getProj);
   ok &= Resolve(engine, gd::kCameraGetFrustum, g_getFrustum);
   if (!ok) return false;
+
+  if (void* gd = reinterpret_cast<void*>(GetProcAddress(engine, gd::kGrassDestroy)))
+    MH_CreateHook(gd, reinterpret_cast<void*>(&HookGrassDestroy), reinterpret_cast<void**>(&g_origGrassDestroy));
+  if (void* lispsm = reinterpret_cast<void*>(GetProcAddress(engine, gd::kRendererLiSPSM)))
+    MH_CreateHook(lispsm, reinterpret_cast<void*>(&HookLiSPSM), reinterpret_cast<void**>(&g_origLiSPSM));
+  else
+    Log("MISSING export: LiSPSM");
 
   MH_STATUS st = MH_CreateHook(render, reinterpret_cast<void*>(&HookRender),
                                reinterpret_cast<void**>(&g_origRender));

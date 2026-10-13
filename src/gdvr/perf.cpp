@@ -6,8 +6,11 @@
 
 #include <array>
 #include <atomic>
+#include <mutex>
+#include <vector>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <utility>
 
@@ -28,6 +31,7 @@ struct Stage {
   const char* name;
   const char* symbol;
   bool boolArg = false;                   // log how many calls passed true
+  bool logStack = false;                  // log distinct call stacks (module+offset)
   std::atomic<int> trueCalls{0};
   GenericFn original = nullptr;
   std::atomic<int64_t> ticks{0};
@@ -63,6 +67,12 @@ Stage g_stages[] = {
     {"TerrainPatch.Update", "?Update@TerrainPatch@GAME@@UEAAXH@Z"},
     {"Grass.UpdateOffsetField", "?UpdateOffsetField@GrassObject@GAME@@MEAAXAEAVTerrainBase@2@AEBV?$vector@I@mem@@HHH@Z"},
     {"Grass.SetupGeometry", "?SetupGrassGeometry@GrassObject@GAME@@MEAAXPEAVTerrainBase@2@AEBV?$vector@I@mem@@HHHHPEAVTerrainPatch@2@@Z"},
+    {"Shadow.BuildDir", "?BuildShadowDirectional@GraphicsMTRenderer@GAME@@IEAAXAEBVVec3@2@0PEAULightEntry@2@AEAVGraphicsScene@2@AEAV?$vector@PEAVEntity@GAME@@@mem@@@Z"},
+    {"Shadow.RenderDir", "?RenderShadowDirectional@GraphicsMTRenderer@GAME@@IEAAXPEBULightEntry@2@AEAVGraphicsScene@2@@Z"},
+    {"Shadow.Bounds", "?CalculateShadowBounds@GraphicsMTRenderer@GAME@@IEBAXAEBVABBox@2@AEBVSphere@2@AEAV32@@Z"},
+    {"WorldCamera.GetFrustum", "?GetFrustum@WorldCamera@GAME@@QEBA?AVWorldFrustum@2@AEBVViewport@2@@Z"},
+    {"Engine.Update", "?Update@Engine@GAME@@QEAAXPEBVSphere@2@PEBVWorldFrustum@2@_N1@Z"},
+    {"Grass.DestroyB", "?DestroyGrass@GrassObject@GAME@@MEAAXXZ"},
     {"TRI.RenderGrass", "?RenderGrass@TerrainRenderInterface@GAME@@EEBAXPEBVTerrainRenderBatch@2@AEBVName@2@AEAVGraphicsCanvas@2@AEBVGraphicsScene@2@AEBURenderablePass@2@H@Z"},
     {"TRIRT.RenderGrass", "?RenderGrass@TerrainRenderInterfaceRT@GAME@@EEBAXPEBVTerrainRenderBatch@2@AEBVName@2@AEAVGraphicsCanvas@2@AEBVGraphicsScene@2@AEBURenderablePass@2@H@Z"},
     {"Patch.RenderGrass", "?RenderGrass@TerrainPatch@GAME@@IEBAXAEBURenderablePass@2@AEBVName@2@AEAVGraphicsCanvas@2@AEBVGraphicsScene@2@@Z"},
@@ -76,6 +86,38 @@ constexpr int kStageCount = int(std::size(g_stages));
 
 std::atomic<int> g_inFlight{0};
 std::atomic<int> g_currentEye{-1};
+
+// Distinct call stacks captured for stages with logStack (logged once each).
+std::mutex g_stackMutex;
+std::vector<std::string> g_stacksSeen;
+
+std::string ModuleOffset(void* addr) {
+  HMODULE mod = nullptr;
+  if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          static_cast<LPCWSTR>(addr), &mod))
+    return "?";
+  wchar_t name[MAX_PATH];
+  GetModuleFileNameW(mod, name, MAX_PATH);
+  const wchar_t* base = wcsrchr(name, L'\\');
+  char buf[160];
+  snprintf(buf, sizeof(buf), "%ls+0x%llX", base ? base + 1 : name,
+           (unsigned long long)(static_cast<uint8_t*>(addr) - reinterpret_cast<uint8_t*>(mod)));
+  return buf;
+}
+
+void RecordStack(const char* stage) {
+  void* frames[8];
+  const USHORT n = RtlCaptureStackBackTrace(2, 8, frames, nullptr);
+  std::string s = std::string(stage) + " <-";
+  for (USHORT i = 0; i < n; ++i) s += " " + ModuleOffset(frames[i]);
+  std::lock_guard lock(g_stackMutex);
+  for (const auto& seen : g_stacksSeen)
+    if (seen == s) return;
+  if (g_stacksSeen.size() < 20) {
+    g_stacksSeen.push_back(s);
+    Log("stack: %s", s.c_str());
+  }
+}
 
 int64_t Ticks() {
   LARGE_INTEGER t;
@@ -91,6 +133,7 @@ template <int I>
 uintptr_t StageDetour(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g,
                       uintptr_t h) {
   ++g_inFlight;
+  if (g_stages[I].logStack) RecordStack(g_stages[I].name);
   const int64_t t0 = Ticks();
   const uintptr_t r = g_stages[I].original(a, b, c, d, e, f, g, h);
   g_stages[I].ticks += Ticks() - t0;
@@ -204,6 +247,7 @@ void LogWindow(double seconds) {
 bool InstallStageHooks(HMODULE engine) {
   int hooked = 0;
   for (int i = 0; i < kStageCount; ++i) {
+    g_stages[i].logStack = false;
     void* target = reinterpret_cast<void*>(GetProcAddress(engine, g_stages[i].symbol));
     if (!target) {
       Log("perf: missing export %s", g_stages[i].name);
