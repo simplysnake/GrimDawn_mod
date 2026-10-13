@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstring>
 
+#include "d3dtrace.h"
 #include "log.h"
 
 namespace gdvr::mask {
@@ -118,6 +119,7 @@ DXGI_FORMAT SrvFormatFor(DXGI_FORMAT f) {
 void STDMETHODCALLTYPE HookOMSetRenderTargets(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* rtvs,
                                               ID3D11DepthStencilView* dsv) {
   ++g_inFlight;
+  d3dtrace::OnSetRenderTargets(n, reinterpret_cast<void* const*>(rtvs), dsv);
   if (g_capturing && dsv && dsv != g_lastDsv) {
     g_lastDsv = dsv;
     ID3D11Resource* res = nullptr;

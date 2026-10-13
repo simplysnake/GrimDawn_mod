@@ -52,6 +52,7 @@ target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/
 
 # The mod itself, injected into Grim Dawn.exe
 add_library(gdvr SHARED
+  src/gdvr/d3dtrace.cpp
   src/gdvr/dllmain.cpp
   src/gdvr/engine_hooks.cpp
   src/gdvr/overlay.cpp

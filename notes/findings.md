@@ -91,6 +91,16 @@ timestamp queries). `[vr] bench=1` renders stereo while the headset sleeps; `too
 - Hot reload must tear down on the render thread (inside Present): doing it from the injector's thread raced the
   D3D11 immediate context and hung the game.
 
+## Right eye missing glow / FXAA (2026-10-12) - fixed
+
+- D3D trace per eye (`diag_trace`, tools: d3dtrace.cpp) showed the second render skipped the target-glow pass
+  (clear, 9 draws of highlighted objects, 2560x720 + 1280x720 blur, composite) and two final full-screen passes.
+- Cause: per-frame render settings at `GraphicsMTRenderer+0x1E0` (16 bytes: flag bytes + a float, 1.5) are set
+  by the game each frame and cleared by the renderer after the first Render. Found with the "consumed" scan
+  (`diag_toggle`): words changed by the first eye's render and untouched by the second.
+- Fix: copy those 16 bytes before the first eye and restore them before the second. F5 toggles it.
+- Not it: the Engine.dll frame counter (+0x41C574) - bumping it changed nothing (kept, off).
+
 ## Week 1 questions (answer with the debug overlay)
 
 1. How many `Render` calls per frame, and which is the main view? (viewport size)

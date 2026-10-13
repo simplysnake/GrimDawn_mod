@@ -14,6 +14,7 @@
 
 #include "engine_hooks.h"
 #include "log.h"
+#include "d3dtrace.h"
 #include "mask.h"
 #include "perf.h"
 #include "xr.h"
@@ -108,7 +109,10 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swapChain, UINT syncInterv
 
   if (!g_imguiReady) {
     g_imguiReady = InitImGui(swapChain);
-    if (g_context) mask::InstallHook(g_context);
+    if (g_context) {
+      mask::InstallHook(g_context);
+      d3dtrace::InstallHooks(g_context);
+    }
   }
 
   static bool keyWasDown = false;

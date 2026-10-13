@@ -16,6 +16,7 @@
 #include <cmath>
 
 #include "engine_api.h"
+#include "d3dtrace.h"
 #include "input.h"
 #include "log.h"
 #include "mask.h"
@@ -162,11 +163,16 @@ size_t ReadableWords(const void* p) {
   return std::min(kSnapWords, avail / 4);
 }
 
+std::vector<int> g_consumedHits;  // changed by the first eye's render, untouched by the second
+
 void ToggleDiag(const void* renderer, const std::vector<uint32_t>& s0, const std::vector<uint32_t>& s1,
                 const std::vector<uint32_t>& s2) {
   if (g_toggleHits.size() < s0.size()) g_toggleHits.assign(s0.size(), 0);
-  for (size_t i = 0; i < s0.size(); ++i)
+  if (g_consumedHits.size() < s0.size()) g_consumedHits.assign(s0.size(), 0);
+  for (size_t i = 0; i < s0.size(); ++i) {
     if (s0[i] != s1[i] && s0[i] == s2[i]) ++g_toggleHits[i];
+    if (s0[i] != s1[i] && s1[i] == s2[i]) ++g_consumedHits[i];
+  }
   if (--g_toggleDiagFrames > 0) return;
   int logged = 0;
   for (size_t i = 0; i < g_toggleHits.size() && logged < 40; ++i)
@@ -175,7 +181,18 @@ void ToggleDiag(const void* renderer, const std::vector<uint32_t>& s0, const std
       ++logged;
     }
   Log("toggle: %d candidate words (renderer %p)", logged, renderer);
+  // "Consumed" words: e.g. a list's end pointer reset to its begin by the first render.
+  logged = 0;
+  for (size_t i = 0; i + 1 < g_consumedHits.size() && logged < 60; ++i)
+    if (g_consumedHits[i] >= 4) {
+      const uint64_t before = s0[i] | (uint64_t(i + 1 < s0.size() ? s0[i + 1] : 0) << 32);
+      const uint64_t after = s1[i] | (uint64_t(i + 1 < s1.size() ? s1[i + 1] : 0) << 32);
+      Log("consumed: renderer+0x%04zX changed by first eye only (%d/6): %016llX -> %016llX", i * 4,
+          g_consumedHits[i], (unsigned long long)before, (unsigned long long)after);
+      ++logged;
+    }
   g_toggleHits.clear();
+  g_consumedHits.clear();
 }
 
 // ---- Diagnostic: find frame counters --------------------------------------------------------
@@ -242,7 +259,13 @@ void CounterDiagFrame(const void* renderer) {
 // Optional fix under test: an address that is bumped (+1) for the second eye's render and
 // restored afterwards, so the engine treats that render as a new frame.
 uint32_t* g_bumpAddress = nullptr;
-bool g_bumpEnabled = true;   // F5 toggles, for A/B comparison in the headset
+bool g_bumpEnabled = false;  // the frame-counter bump did not fix the right eye; kept for experiments
+
+// Per-frame render settings the game sets each frame and the renderer clears after the first
+// Render (flags + a float at renderer+0x1E0: target glow / post effects). Saving them before the
+// first eye and restoring them before the second gives both eyes glow and FXAA.
+constexpr size_t kReplayOffset = 0x1E0, kReplaySize = 16;
+bool g_replayEnabled = true;  // F5 toggles, for A/B comparison in the headset
 
 // Engine frame counter (found with diag_counter): bumping it for the second eye makes the engine
 // run its once-per-frame post-processing (FXAA, glow) for that eye too.
@@ -294,6 +317,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   };
   snap(0);
 
+  uint8_t replayBytes[kReplaySize];
   for (int pass = 0; pass < 2; ++pass) {
     const int eye = s.swapEyeOrder ? 1 - pass : pass;
     const Pose p = xr::EyePose(eye);
@@ -323,18 +347,23 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     const double t0 = NowMs();
     mask::BeginCapture(unsigned(g_vpWidth(viewport)), unsigned(g_vpHeight(viewport)), s.maskDepthPick);
     perf::SetCurrentEye(eye);
+    d3dtrace::SetEye(eye);
     static bool f5Was = false;
     const bool f5 = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
     if (pass == 0 && f5 && !f5Was) {
-      g_bumpEnabled = !g_bumpEnabled;
-      Log("second-eye frame bump -> %s", g_bumpEnabled ? "on" : "off");
+      g_replayEnabled = !g_replayEnabled;
+      Log("per-frame settings replay for the second eye -> %s", g_replayEnabled ? "on" : "off");
     }
+    auto* replay = reinterpret_cast<uint8_t*>(self) + kReplayOffset;
+    if (pass == 0) std::memcpy(replayBytes, replay, kReplaySize);
+    else if (g_replayEnabled) std::memcpy(replay, replayBytes, kReplaySize);
     if (pass == 0) f5Was = f5;
     if (!g_bumpAddress) g_bumpAddress = ResolveBump(kDefaultBump);
     uint32_t* bump = pass == 1 && g_bumpEnabled ? g_bumpAddress : nullptr;
     if (bump) ++*bump;
     g_origRender(self, camera, region, viewport, eyeFrustum, flags, flag2, worldFrustum);
     if (bump) --*bump;
+    d3dtrace::SetEye(-1);
     perf::SetCurrentEye(-1);
     mask::EndCapture();
     perf::AddEyeCpu(eye, NowMs() - t0);
@@ -483,6 +512,11 @@ void PollControlFile() {
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
   vr.bench = getInt(L"bench", vr.bench) != 0;
   vr.swapEyeOrder = getInt(L"swap_eye_order", vr.swapEyeOrder) != 0;
+  static int lastTrace = 0;
+  if (int t = getInt(L"diag_trace", lastTrace); t != lastTrace) {
+    lastTrace = t;
+    d3dtrace::Arm();
+  }
   static int lastCounterDiag = 0;
   if (int t = getInt(L"diag_counter", lastCounterDiag); t != lastCounterDiag) {
     lastCounterDiag = t;
