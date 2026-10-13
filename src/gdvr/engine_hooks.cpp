@@ -58,11 +58,8 @@ gd::CameraSetFloatFn g_setFov = nullptr, g_setAspect = nullptr, g_setFar = nullp
 gd::CameraGetProjectionFn g_getProj = nullptr;
 gd::CameraGetFrustumFn g_getFrustum = nullptr;
 gd::RendererGetCameraTargetFn g_cameraTarget = nullptr;
-gd::WorldFrustumInitializeFn g_wfInit = nullptr;
-gd::WorldFrustumGetRegionFn g_wfRegion = nullptr;
 
 
-bool g_eyeWorldFrustum = false;  // F4 toggles (on culls leaves/walls wrongly - frustum space mismatch): per-eye world frustum (shadows / culling follow the eye)
 
 std::atomic<int> g_inFlight{0};
 std::mutex g_mutex;
@@ -84,40 +81,6 @@ struct InFlightGuard {
   ~InFlightGuard() { --g_inFlight; }
 };
 
-// Experiment: keep grass alive (skip DestroyGrass) to test whether grass churn causes the black
-// blades in the second eye. F2 toggles. Leaks grass memory over time if left on while travelling.
-gd::GrassDestroyFn g_origGrassDestroy = nullptr;
-std::atomic<bool> g_keepGrass{false};
-std::atomic<int> g_grassDestroySkipped{0};
-
-void HookGrassDestroy(void* self, void* terrain) {
-  ++g_inFlight;
-  if (g_keepGrass && xr::GetSettings().mode == xr::Mode::Stereo) {
-    ++g_grassDestroySkipped;
-  } else {
-    g_origGrassDestroy(self, terrain);
-  }
-  --g_inFlight;
-}
-
-gd::RendererLiSPSMFn g_origLiSPSM = nullptr;
-bool g_shareShadowMatrix = true;  // F3 toggles: second eye reuses the first eye's shadow matrix
-int g_currentPass = -1;           // which stereo pass is rendering (-1 = not in stereo)
-float g_shadowMatrix[16];
-bool g_haveShadowMatrix = false;
-
-void HookLiSPSM(const gd::GraphicsMTRenderer* self, const gd::Camera* camera, const void* lightDir,
-                const gd::Frustum* frustum, gd::Mat4* out) {
-  ++g_inFlight;
-  g_origLiSPSM(self, camera, lightDir, frustum, out);
-  if (g_currentPass == 0) {
-    std::memcpy(g_shadowMatrix, out, sizeof(g_shadowMatrix));
-    g_haveShadowMatrix = true;
-  } else if (g_currentPass == 1 && g_shareShadowMatrix && g_haveShadowMatrix) {
-    std::memcpy(out, g_shadowMatrix, sizeof(g_shadowMatrix));
-  }
-  --g_inFlight;
-}
 
 double NowMs() {
   static LARGE_INTEGER freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f; }();
@@ -335,16 +298,10 @@ void GlobalConsumedFrame() {
   g_gHits.clear();
 }
 
-// Optional fix under test: an address that is bumped (+1) for the second eye's render and
-// restored afterwards, so the engine treats that render as a new frame.
-uint32_t* g_bumpAddress = nullptr;
-bool g_bumpEnabled = false;  // the frame-counter bump did not fix the right eye; kept for experiments
-
 // Per-frame render settings the game sets each frame and the renderer clears after the first
 // Render (flags + a float at renderer+0x1E0: target glow / post effects). Saving them before the
 // first eye and restoring them before the second gives both eyes glow and FXAA.
 constexpr size_t kReplayOffset = 0x1E0, kReplaySize = 16;
-bool g_replayEnabled = true;  // F5 toggles, for A/B comparison in the headset
 
 // Extra renderer ranges replayed the same way (offset, size), from control.ini replay_extra,
 // e.g. "38:8,814:4" (hex). Used to test other state the first render consumes.
@@ -353,19 +310,6 @@ struct ReplayRange {
 };
 std::vector<ReplayRange> g_replayExtra;
 uint8_t g_replayExtraBytes[256];
-
-// Engine frame counter (found with diag_counter): bumping it for the second eye makes the engine
-// run its once-per-frame post-processing (FXAA, glow) for that eye too.
-constexpr char kDefaultBump[] = "Engine.dll+0x41C574";
-
-uint32_t* ResolveBump(const char* spec) {
-  char mod[64] = {};
-  const char* plus = std::strchr(spec, '+');
-  if (!plus || plus - spec >= int(sizeof(mod))) return nullptr;
-  std::memcpy(mod, spec, plus - spec);
-  HMODULE m = GetModuleHandleA(mod);
-  return m ? reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(m) + std::strtoull(plus + 1, nullptr, 16)) : nullptr;
-}
 
 // Renders the scene once per eye: the game camera is replaced by the eye's camera
 // (game camera + head pose), the result is captured for the headset, and the camera is restored.
@@ -432,71 +376,18 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     if (s.recomputeFrustum)
       eyeFrustum = g_getFrustum(camera, reinterpret_cast<gd::Frustum*>(frustumBuf[eye]), viewport);
 
-    // The world frustum (region culling, shadow fitting) came from the game's own camera; rebuild
-    // it from this eye's frustum so shadows and culling follow the eye. Copy the original first so
-    // any fields Initialize doesn't touch stay valid.
-    const gd::WorldFrustum* eyeWorldFrustum = worldFrustum;
-    {
-      static bool f4Was = false;
-      const bool f4 = (GetAsyncKeyState(VK_F4) & 0x8000) != 0;
-      if (pass == 0 && f4 && !f4Was) {
-        g_eyeWorldFrustum = !g_eyeWorldFrustum;
-        Log("per-eye world frustum -> %s", g_eyeWorldFrustum ? "on" : "off");
-      }
-      if (pass == 0) f4Was = f4;
-    }
-    if (g_eyeWorldFrustum && s.recomputeFrustum && worldFrustum) {
-      // Layout: Region*, plane count, planes (plain data, ~0x80 bytes).
-      alignas(16) static unsigned char worldFrustumBuf[2][256];
-      const size_t avail = ReadableWords(worldFrustum) * 4;
-      std::memcpy(worldFrustumBuf[eye], worldFrustum, std::min(avail, sizeof(worldFrustumBuf[eye])));
-      auto* wf = reinterpret_cast<gd::WorldFrustum*>(worldFrustumBuf[eye]);
-      g_wfInit(wf, g_wfRegion(worldFrustum), eyeFrustum);
-      eyeWorldFrustum = wf;
-    }
-
     if (pass == 0) perf::Mark(perf::kEye0Begin);
     const double t0 = NowMs();
     mask::BeginCapture(unsigned(g_vpWidth(viewport)), unsigned(g_vpHeight(viewport)), s.maskDepthPick);
-    mask::RestoreEyeHistory(eye);  // this eye's own previous depth, not the other eye's
+    mask::RestoreEyeHistory(eye);  // neutralise the engine's previous-depth soft blend (see mask.h)
     perf::SetCurrentEye(eye);
     d3dtrace::SetEye(eye);
-    {
-      static bool f3Was = false;
-      const bool f3 = (GetAsyncKeyState(VK_F3) & 0x8000) != 0;
-      if (pass == 0 && f3 && !f3Was) {
-        g_shareShadowMatrix = !g_shareShadowMatrix;
-        Log("shared shadow matrix -> %s", g_shareShadowMatrix ? "on" : "off");
-      }
-      if (pass == 0) f3Was = f3;
-      static bool f1Was = false;
-      const bool f1 = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
-      if (pass == 0 && f1 && !f1Was) {
-        static const char* kModes[] = {"engine default", "per-eye history", "soft blend off"};
-        mask::SetDepthHistoryMode((mask::DepthHistoryMode() + 1) % 3);
-        Log("depth history mode -> %s", kModes[mask::DepthHistoryMode()]);
-      }
-      if (pass == 0) f1Was = f1;
-      static bool f2Was = false;
-      const bool f2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
-      if (pass == 0 && f2 && !f2Was) {
-        g_keepGrass = !g_keepGrass;
-        Log("keep grass (skip DestroyGrass) -> %s (skipped so far %d)", g_keepGrass ? "on" : "off",
-            g_grassDestroySkipped.load());
-      }
-      if (pass == 0) f2Was = f2;
-    }
-    g_currentPass = pass;
-    if (pass == 0) g_haveShadowMatrix = false;
-    static bool f5Was = false;
-    const bool f5 = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
-    if (pass == 0 && f5 && !f5Was) {
-      g_replayEnabled = !g_replayEnabled;
-      Log("per-frame settings replay for the second eye -> %s", g_replayEnabled ? "on" : "off");
-    }
+
+    // Per-frame render settings the renderer clears after the first Render (glow / post effects):
+    // capture them before the first eye, restore them before the second.
     auto* replay = reinterpret_cast<uint8_t*>(self) + kReplayOffset;
     if (pass == 0) std::memcpy(replayBytes, replay, kReplaySize);
-    else if (g_replayEnabled) std::memcpy(replay, replayBytes, kReplaySize);
+    else std::memcpy(replay, replayBytes, kReplaySize);
     {
       size_t at = 0;
       for (const ReplayRange& r : g_replayExtra) {
@@ -507,15 +398,10 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
         at += r.size;
       }
     }
-    if (pass == 0) f5Was = f5;
-    if (!g_bumpAddress) g_bumpAddress = ResolveBump(kDefaultBump);
-    uint32_t* bump = pass == 1 && g_bumpEnabled ? g_bumpAddress : nullptr;
-    if (bump) ++*bump;
-    g_origRender(self, camera, region, viewport, eyeFrustum, flags, flag2, eyeWorldFrustum);
-    if (bump) --*bump;
+
+    g_origRender(self, camera, region, viewport, eyeFrustum, flags, flag2, worldFrustum);
     d3dtrace::SetEye(-1);
     mask::SaveEyeHistory(eye);
-    g_currentPass = -1;
     perf::SetCurrentEye(-1);
     mask::EndCapture();
     perf::AddEyeCpu(eye, NowMs() - t0);
@@ -665,7 +551,6 @@ void PollControlFile() {
   vr.screenDistance = getFloat(L"screen_distance", vr.screenDistance);
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
   vr.bench = getInt(L"bench", vr.bench) != 0;
-  g_keepGrass = getInt(L"keep_grass", g_keepGrass) != 0;
   mask::SetDepthHistoryMode(std::clamp(getInt(L"depth_history", mask::DepthHistoryMode()), 0, 2));
   vr.swapEyeOrder = getInt(L"swap_eye_order", vr.swapEyeOrder) != 0;
   {
@@ -706,22 +591,6 @@ void PollControlFile() {
   if (int t = getInt(L"diag_counter", lastCounterDiag); t != lastCounterDiag) {
     lastCounterDiag = t;
     g_counterDiagFrames = 8;
-  }
-  {
-    wchar_t buf[64];
-    // "Module.dll+0xRVA" (stable across launches) or an absolute hex address.
-    GetPrivateProfileStringW(L"vr", L"bump_address", L"", buf, 64, path.c_str());
-    if (!buf[0]) goto noBump;  // keep the default
-    g_bumpAddress = nullptr;
-    if (wchar_t* plus = wcschr(buf, L'+')) {
-      *plus = 0;
-      if (HMODULE mod = GetModuleHandleW(buf))
-        g_bumpAddress = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(mod) + _wcstoui64(plus + 1, nullptr, 16));
-    } else if (buf[0]) {
-      g_bumpAddress = reinterpret_cast<uint32_t*>(_wcstoui64(buf, nullptr, 16));
-    }
-    if (g_bumpAddress) Log("bump address %p for the second eye", g_bumpAddress);
-  noBump:;
   }
   static int lastToggleDiag = 0;
   if (int t = getInt(L"diag_toggle", lastToggleDiag); t != lastToggleDiag) {
@@ -779,18 +648,10 @@ bool Install() {
   ok &= Resolve(engine, gd::kCameraSetAspect, g_setAspect);
   ok &= Resolve(engine, gd::kCameraSetFar, g_setFar);
   ok &= Resolve(engine, gd::kRendererGetCameraTarget, g_cameraTarget);
-  ok &= Resolve(engine, gd::kWorldFrustumInitialize, g_wfInit);
-  ok &= Resolve(engine, gd::kWorldFrustumGetRegion, g_wfRegion);
   ok &= Resolve(engine, gd::kCameraGetProjection, g_getProj);
   ok &= Resolve(engine, gd::kCameraGetFrustum, g_getFrustum);
   if (!ok) return false;
 
-  if (void* gd = reinterpret_cast<void*>(GetProcAddress(engine, gd::kGrassDestroy)))
-    MH_CreateHook(gd, reinterpret_cast<void*>(&HookGrassDestroy), reinterpret_cast<void**>(&g_origGrassDestroy));
-  if (void* lispsm = reinterpret_cast<void*>(GetProcAddress(engine, gd::kRendererLiSPSM)))
-    MH_CreateHook(lispsm, reinterpret_cast<void*>(&HookLiSPSM), reinterpret_cast<void**>(&g_origLiSPSM));
-  else
-    Log("MISSING export: LiSPSM");
 
   MH_STATUS st = MH_CreateHook(render, reinterpret_cast<void*>(&HookRender),
                                reinterpret_cast<void**>(&g_origRender));

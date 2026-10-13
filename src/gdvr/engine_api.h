@@ -64,23 +64,6 @@ using CameraGetFrustumFn = Frustum* (*)(const Camera* self, Frustum* result, con
 inline constexpr char kRendererGetCameraTarget[] = "?GetCameraTarget@GraphicsMTRenderer@GAME@@QEBAAEBVWorldVec3@2@XZ";
 using RendererGetCameraTargetFn = const float* (*)(const GraphicsMTRenderer* self);
 
-// void WorldFrustum::Initialize(Region*, const Frustum&) / Region* WorldFrustum::GetRegion() const
-inline constexpr char kWorldFrustumInitialize[] = "?Initialize@WorldFrustum@GAME@@QEAAXPEAVRegion@2@AEBVFrustum@2@@Z";
-inline constexpr char kWorldFrustumGetRegion[] = "?GetRegion@WorldFrustum@GAME@@QEBAPEAVRegion@2@XZ";
-using WorldFrustumInitializeFn = void (*)(WorldFrustum* self, Region* region, const Frustum* frustum);
-using WorldFrustumGetRegionFn = Region* (*)(const WorldFrustum* self);
-
-// void GraphicsMTRenderer::LightSpacePerspectiveShadowMapMatrix(const Camera&, const Vec3& lightDir,
-//                                                              const Frustum&, Mat4& out) const
-inline constexpr char kRendererLiSPSM[] =
-    "?LightSpacePerspectiveShadowMapMatrix@GraphicsMTRenderer@GAME@@IEBAXAEBVCamera@2@AEBVVec3@2@AEBVFrustum@2@AEAVMat4@2@@Z";
-using RendererLiSPSMFn = void (*)(const GraphicsMTRenderer* self, const Camera* camera, const void* lightDir,
-                                  const Frustum* frustum, Mat4* out);
-
-// void GrassObject::DestroyGrass(TerrainBase*)  (called by TerrainBase::UnloadOldObjects from the game update)
-inline constexpr char kGrassDestroy[] = "?DestroyGrass@GrassObject@GAME@@MEAAXPEAVTerrainBase@2@@Z";
-using GrassDestroyFn = void (*)(void* self, void* terrain);
-
 // int Viewport::GetWidth/GetHeight() const
 inline constexpr char kViewportGetWidth[] = "?GetWidth@Viewport@GAME@@QEBAHXZ";
 inline constexpr char kViewportGetHeight[] = "?GetHeight@Viewport@GAME@@QEBAHXZ";

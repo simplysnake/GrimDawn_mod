@@ -112,6 +112,18 @@ timestamp queries). `[vr] bench=1` renders stereo while the headset sleeps; `too
 - Not it: world frustum per eye (F4) - culls leaves/walls wrongly (frustum space mismatch), default off.
 - No per-frame state consumed by the first eye in the engine DLLs' globals (diag_gconsumed).
 
+## Dark edges on grass / rocks / characters (2026-10-12) - fixed (effect switched off)
+
+- Not a separate pass: the geometry pass itself samples `ps slot 3` = a copy of the PREVIOUS render's depth
+  (soft blending of grass, rock crevices, characters into the ground). The engine refreshes the copy
+  (CopyResource G-buffer depth -> copy) only after the geometry pass. In stereo the previous render is the other
+  eye -> misaligned dark edges that move with head rotation. Found by tracing screen-sized SRVs per pass.
+- Per-eye history (each eye's own previous depth) aligned the edges but lagged head motion.
+- Fix: clear the engine's depth copy to far depth before each eye's geometry pass (blend becomes a no-op; the copy
+  is still refreshed for later passes). User: "off is the correct move, it looks good".
+- Earlier theories that were wrong: grass churn (F2 keep-grass no effect), shadow matrix mismatch, frame counter,
+  per-eye world frustum (culls wrongly), the fade mask, SteamVR motion smoothing.
+
 ## Week 1 questions (answer with the debug overlay)
 
 1. How many `Render` calls per frame, and which is the main view? (viewport size)

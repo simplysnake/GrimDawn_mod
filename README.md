@@ -39,8 +39,8 @@ Log: `%LOCALAPPDATA%\gdvr\gdvr.log`
 ## VR
 
 - Launch with `bin\gdvr_launch.exe` (or the Steam shortcut). It starts SteamVR first, then the game, then the mod.
-- **F9** cycles VR mode (Off → Screen → Stereo), **F10** recentres, **F8** toggles the debug window,
-  **F7** cycles the fade mask (on → distance rings → off).
+- Hotkeys: **F9** VR mode (Off → Screen → Stereo), **F10** recentre (or click both sticks), **F8** debug window,
+  **F7** fade mask (on → distance rings → off), **F11** save both eye images to `%LOCALAPPDATA%\gdvr\eyeN.bmp`.
 - Settings: `%LOCALAPPDATA%\gdvr\control.ini`, section `[vr]`: `mode`, `world_scale`, `fov_deg` (0 = fit lenses),
   `level_horizon`, `recompute_frustum`, `screen_distance`, `screen_width`, `recenter` (change the number to recentre),
   `far_plane` (default 70), `mask`, `mask_inner`/`mask_outer` (fade distances from the player, default 45/62),

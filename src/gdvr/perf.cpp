@@ -62,25 +62,6 @@ Stage g_stages[] = {
     {"Def.Fog", "?RenderFog@GraphicsDeferredRenderer@GAME@@AEAAXAEBVGraphicsScene@2@@Z"},
     {"Def.FinalScene", "?RenderFinalScene@GraphicsDeferredRenderer@GAME@@UEAAXAEAVGraphicsScene@2@@Z"},
     {"Def.Stencil", "?RenderStencilBuffer@GraphicsDeferredRenderer@GAME@@AEAAXAEBVViewport@2@HAEBVColor@2@@Z"},
-    // Terrain / grass (investigating the grass outlines in the second eye)
-    {"Terrain.Update", "?Update@Terrain@GAME@@UEAAXQEBVFrustum@2@IH@Z"},
-    {"TerrainPatch.Update", "?Update@TerrainPatch@GAME@@UEAAXH@Z"},
-    {"Grass.UpdateOffsetField", "?UpdateOffsetField@GrassObject@GAME@@MEAAXAEAVTerrainBase@2@AEBV?$vector@I@mem@@HHH@Z"},
-    {"Grass.SetupGeometry", "?SetupGrassGeometry@GrassObject@GAME@@MEAAXPEAVTerrainBase@2@AEBV?$vector@I@mem@@HHHHPEAVTerrainPatch@2@@Z"},
-    {"Shadow.BuildDir", "?BuildShadowDirectional@GraphicsMTRenderer@GAME@@IEAAXAEBVVec3@2@0PEAULightEntry@2@AEAVGraphicsScene@2@AEAV?$vector@PEAVEntity@GAME@@@mem@@@Z"},
-    {"Shadow.RenderDir", "?RenderShadowDirectional@GraphicsMTRenderer@GAME@@IEAAXPEBULightEntry@2@AEAVGraphicsScene@2@@Z"},
-    {"Shadow.Bounds", "?CalculateShadowBounds@GraphicsMTRenderer@GAME@@IEBAXAEBVABBox@2@AEBVSphere@2@AEAV32@@Z"},
-    {"WorldCamera.GetFrustum", "?GetFrustum@WorldCamera@GAME@@QEBA?AVWorldFrustum@2@AEBVViewport@2@@Z"},
-    {"Engine.Update", "?Update@Engine@GAME@@QEAAXPEBVSphere@2@PEBVWorldFrustum@2@_N1@Z"},
-    {"Grass.DestroyB", "?DestroyGrass@GrassObject@GAME@@MEAAXXZ"},
-    {"TRI.RenderGrass", "?RenderGrass@TerrainRenderInterface@GAME@@EEBAXPEBVTerrainRenderBatch@2@AEBVName@2@AEAVGraphicsCanvas@2@AEBVGraphicsScene@2@AEBURenderablePass@2@H@Z"},
-    {"TRIRT.RenderGrass", "?RenderGrass@TerrainRenderInterfaceRT@GAME@@EEBAXPEBVTerrainRenderBatch@2@AEBVName@2@AEAVGraphicsCanvas@2@AEBVGraphicsScene@2@AEBURenderablePass@2@H@Z"},
-    {"Patch.RenderGrass", "?RenderGrass@TerrainPatch@GAME@@IEBAXAEBURenderablePass@2@AEBVName@2@AEAVGraphicsCanvas@2@AEBVGraphicsScene@2@@Z"},
-    // Highlight / outline setters (diagnostic for "glow only in one eye"); first arg is a bool.
-    {"Mesh.SetOutlined", "?SetOutlined@GraphicsMeshInstance@GAME@@QEAAX_N@Z", true},
-    {"Mesh.SetOutlineColor", "?SetOutlineColor@GraphicsMeshInstance@GAME@@QEAAXAEBVColor@2@@Z"},
-    {"Actor.EnableOutline", "?EnableOutline@Actor@GAME@@UEAAX_N@Z", true},
-    {"Actor.SetHighlight", "?SetHighlight@Actor@GAME@@UEAAX_N@Z", true},
 };
 constexpr int kStageCount = int(std::size(g_stages));
 
