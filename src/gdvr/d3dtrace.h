@@ -19,6 +19,10 @@ void SetEye(int eye);
 // Called by the OMSetRenderTargets hook (mask.cpp) while recording.
 void OnSetRenderTargets(unsigned numViews, void* const* rtvs, void* dsv);
 
+// Pass switcher: drop all draws in render-target segment n of each eye render (-1 = off).
+void SetSkipSegment(int segment);
+int SkipSegment();
+
 int InFlight();
 
 }  // namespace gdvr::d3dtrace

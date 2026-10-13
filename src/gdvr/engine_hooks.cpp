@@ -676,6 +676,11 @@ void PollControlFile() {
     lastGlobal = t;
     g_globalConsumedFrames = 6;
   }
+  static int lastSkip = -2;
+  if (int sk = getInt(L"skip_segment", -1); sk != lastSkip) {
+    lastSkip = sk;
+    d3dtrace::SetSkipSegment(sk);
+  }
   static int lastDump = 0;
   if (int t = getInt(L"dump_eyes", lastDump); t != lastDump) {
     lastDump = t;

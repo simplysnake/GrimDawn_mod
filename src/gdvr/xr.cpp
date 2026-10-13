@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "d3dtrace.h"
 #include "input.h"
 #include "log.h"
 
@@ -426,6 +427,18 @@ void OnPresent(IDXGISwapChain* swapChain) {
   // Hotkeys: F7 cycles the mask (on -> distance rings -> off), F9 cycles Off -> Screen -> Stereo,
   // F10 recentres.
   static bool f6Was = false, f7Was = false, f9Was = false, f10Was = false, f11Was = false;
+  // Pass switcher: Page Down / Page Up step the skipped render pass, Home turns it off.
+  static bool pgdnWas = false, pgupWas = false, homeWas = false;
+  const bool pgdn = (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0, pgup = (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0;
+  const bool home = (GetAsyncKeyState(VK_HOME) & 0x8000) != 0;
+  if ((pgdn && !pgdnWas) || (pgup && !pgupWas) || (home && !homeWas)) {
+    const int next = home ? -1 : std::max(-1, d3dtrace::SkipSegment() + (pgdn ? 1 : -1));
+    d3dtrace::SetSkipSegment(next);
+    Log("pass switcher: skipping segment %d", next);
+  }
+  pgdnWas = pgdn;
+  pgupWas = pgup;
+  homeWas = home;
   const bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
   if (f11 && !f11Was) g_dumpEyes = 3;
   f11Was = f11;

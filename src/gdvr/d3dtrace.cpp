@@ -20,7 +20,8 @@ namespace {
 // ID3D11DeviceContext vtable slots (OMSetRenderTargets = 33 is hooked by mask.cpp).
 constexpr int kDrawIndexed = 12, kDraw = 13, kDrawIndexedInstanced = 20, kDrawInstanced = 21,
               kDrawIndexedInstancedIndirect = 39, kDrawInstancedIndirect = 40, kDispatch = 41,
-              kClearRenderTargetView = 50, kClearDepthStencilView = 53, kExecuteCommandList = 58;
+              kClearRenderTargetView = 50, kClearDepthStencilView = 53, kExecuteCommandList = 58,
+              kCopySubresourceRegion = 46, kCopyResource = 47;
 
 std::atomic<int> g_inFlight{0};
 std::atomic<bool> g_armed{false};
@@ -30,6 +31,14 @@ std::vector<std::string> g_lines[2];
 int g_draws = 0;                  // draws since the last line was flushed
 std::string g_target = "?";       // current render-target description
 bool g_hooked = false;
+
+// Pass switcher: render-target segments inside the eye render are numbered from 0 (one per
+// OMSetRenderTargets); draws in segment g_skipSegment are dropped in both eyes (-1 = off).
+std::atomic<int> g_segment{-1};
+std::atomic<int> g_skipSegment{-1};
+std::atomic<int> g_renderEye{-1};  // eye being rendered (independent of recording)
+
+bool SkipDraw() { return g_renderEye >= 0 && g_skipSegment >= 0 && g_segment == g_skipSegment; }
 
 struct Guard {
   Guard() { ++g_inFlight; }
@@ -82,6 +91,9 @@ using DispatchFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UI
 using ClearRtvFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11RenderTargetView*, const FLOAT[4]);
 using ClearDsvFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11DepthStencilView*, UINT, FLOAT, UINT8);
 using ExecuteFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11CommandList*, BOOL);
+using CopyResourceFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
+using CopySubFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, UINT, UINT, UINT, ID3D11Resource*,
+                                           UINT, const D3D11_BOX*);
 
 DrawIndexedFn o_DrawIndexed;
 DrawFn o_Draw;
@@ -92,18 +104,20 @@ DispatchFn o_Dispatch;
 ClearRtvFn o_ClearRtv;
 ClearDsvFn o_ClearDsv;
 ExecuteFn o_Execute;
+CopyResourceFn o_CopyResource;
+CopySubFn o_CopySub;
 
 void STDMETHODCALLTYPE H_DrawIndexed(ID3D11DeviceContext* c, UINT a, UINT b, INT d) {
-  Guard g; CountDraw(); o_DrawIndexed(c, a, b, d);
+  Guard g; CountDraw(); if (SkipDraw()) return; o_DrawIndexed(c, a, b, d);
 }
 void STDMETHODCALLTYPE H_Draw(ID3D11DeviceContext* c, UINT a, UINT b) {
-  Guard g; CountDraw(); o_Draw(c, a, b);
+  Guard g; CountDraw(); if (SkipDraw()) return; o_Draw(c, a, b);
 }
 void STDMETHODCALLTYPE H_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT a, UINT b, UINT d, INT e, UINT f) {
-  Guard g; CountDraw(); o_DrawIndexedInstanced(c, a, b, d, e, f);
+  Guard g; CountDraw(); if (SkipDraw()) return; o_DrawIndexedInstanced(c, a, b, d, e, f);
 }
 void STDMETHODCALLTYPE H_DrawInstanced(ID3D11DeviceContext* c, UINT a, UINT b, UINT d, UINT e) {
-  Guard g; CountDraw(); o_DrawInstanced(c, a, b, d, e);
+  Guard g; CountDraw(); if (SkipDraw()) return; o_DrawInstanced(c, a, b, d, e);
 }
 void STDMETHODCALLTYPE H_DrawIndexedInstancedIndirect(ID3D11DeviceContext* c, ID3D11Buffer* b, UINT o) {
   Guard g; CountDraw(); o_DrawIndexedInstancedIndirect(c, b, o);
@@ -130,6 +144,31 @@ void STDMETHODCALLTYPE H_Execute(ID3D11DeviceContext* c, ID3D11CommandList* l, B
   Guard g;
   if (g_eye >= 0) Record("  execute command list");
   o_Execute(c, l, r);
+}
+
+std::string DescribeResource(ID3D11Resource* r) {
+  ID3D11Texture2D* t = nullptr;
+  std::string s = "buffer/other";
+  if (r && SUCCEEDED(r->QueryInterface(IID_PPV_ARGS(&t)))) {
+    D3D11_TEXTURE2D_DESC d;
+    t->GetDesc(&d);
+    char buf[96];
+    snprintf(buf, sizeof(buf), "%ux%u f%d %p", d.Width, d.Height, int(d.Format), static_cast<void*>(t));
+    s = buf;
+    t->Release();
+  }
+  return s;
+}
+void STDMETHODCALLTYPE H_CopyResource(ID3D11DeviceContext* c, ID3D11Resource* dst, ID3D11Resource* src) {
+  Guard g;
+  if (g_eye >= 0) Record("  copy " + DescribeResource(src) + " -> " + DescribeResource(dst));
+  o_CopyResource(c, dst, src);
+}
+void STDMETHODCALLTYPE H_CopySub(ID3D11DeviceContext* c, ID3D11Resource* dst, UINT ds, UINT x, UINT y, UINT z,
+                                 ID3D11Resource* src, UINT ss, const D3D11_BOX* box) {
+  Guard g;
+  if (g_eye >= 0) Record("  copysub " + DescribeResource(src) + " -> " + DescribeResource(dst));
+  o_CopySub(c, dst, ds, x, y, z, src, ss, box);
 }
 
 template <typename T>
@@ -168,12 +207,16 @@ void InstallHooks(ID3D11DeviceContext* context) {
   Hook(vt, kClearRenderTargetView, reinterpret_cast<void*>(&H_ClearRtv), o_ClearRtv);
   Hook(vt, kClearDepthStencilView, reinterpret_cast<void*>(&H_ClearDsv), o_ClearDsv);
   Hook(vt, kExecuteCommandList, reinterpret_cast<void*>(&H_Execute), o_Execute);
+  Hook(vt, kCopyResource, reinterpret_cast<void*>(&H_CopyResource), o_CopyResource);
+  Hook(vt, kCopySubresourceRegion, reinterpret_cast<void*>(&H_CopySub), o_CopySub);
   Log("trace: draw/clear hooks installed");
 }
 
 void Arm() { g_armed = true; }
 
 void SetEye(int eye) {
+  g_renderEye = eye;
+  g_segment = eye >= 0 ? -1 : -1;
   std::lock_guard lock(g_mutex);
   if (eye >= 0) {
     if (!g_armed) return;
@@ -195,8 +238,9 @@ void SetEye(int eye) {
 }
 
 void OnSetRenderTargets(unsigned numViews, void* const* rtvs, void* dsv) {
+  if (g_renderEye >= 0) ++g_segment;
   if (g_eye < 0) return;
-  std::string s = "set rt";
+  std::string s = "[seg " + std::to_string(g_segment.load()) + "] set rt";
   for (unsigned i = 0; i < numViews && i < 4; ++i)
     s += " [" + Describe(rtvs ? static_cast<ID3D11View*>(rtvs[i]) : nullptr) + "]";
   s += " ds [" + Describe(static_cast<ID3D11View*>(dsv)) + "]";
@@ -204,5 +248,8 @@ void OnSetRenderTargets(unsigned numViews, void* const* rtvs, void* dsv) {
 }
 
 int InFlight() { return g_inFlight.load(); }
+
+void SetSkipSegment(int segment) { g_skipSegment = segment; }
+int SkipSegment() { return g_skipSegment.load(); }
 
 }  // namespace gdvr::d3dtrace
