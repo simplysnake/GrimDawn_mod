@@ -176,7 +176,8 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   // Frustum objects are built in place by the engine (size unknown, so over-allocate).
   alignas(16) static unsigned char frustumBuf[2][4096];
 
-  for (int eye = 0; eye < 2; ++eye) {
+  for (int pass = 0; pass < 2; ++pass) {
+    const int eye = s.swapEyeOrder ? 1 - pass : pass;
     const Pose p = xr::EyePose(eye);
     float eyeCoords[kCoordsCopy];
     std::memcpy(eyeCoords, saved, sizeof(eyeCoords));
@@ -200,10 +201,12 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     if (s.recomputeFrustum)
       eyeFrustum = g_getFrustum(camera, reinterpret_cast<gd::Frustum*>(frustumBuf[eye]), viewport);
 
-    if (eye == 0) perf::Mark(perf::kEye0Begin);
+    if (pass == 0) perf::Mark(perf::kEye0Begin);
     const double t0 = NowMs();
     mask::BeginCapture(unsigned(g_vpWidth(viewport)), unsigned(g_vpHeight(viewport)), s.maskDepthPick);
+    perf::SetCurrentEye(eye);
     g_origRender(self, camera, region, viewport, eyeFrustum, flags, flag2, worldFrustum);
+    perf::SetCurrentEye(-1);
     mask::EndCapture();
     perf::AddEyeCpu(eye, NowMs() - t0);
 
@@ -229,7 +232,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
       xr::ApplyMask(mp);
     }
     xr::CaptureEye(eye, tanX, tanY);
-    perf::Mark(eye == 0 ? perf::kEye0End : perf::kEye1End);
+    perf::Mark(pass == 0 ? perf::kEye0End : perf::kEye1End);
   }
 
   // Both eyes are captured: from here on the game draws its HUD, onto a transparent back buffer.
@@ -348,6 +351,7 @@ void PollControlFile() {
   vr.screenDistance = getFloat(L"screen_distance", vr.screenDistance);
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
   vr.bench = getInt(L"bench", vr.bench) != 0;
+  vr.swapEyeOrder = getInt(L"swap_eye_order", vr.swapEyeOrder) != 0;
   vr.hud = getInt(L"hud", vr.hud) != 0;
   vr.hudDistance = getFloat(L"hud_distance", vr.hudDistance);
   vr.hudWidth = getFloat(L"hud_width", vr.hudWidth);

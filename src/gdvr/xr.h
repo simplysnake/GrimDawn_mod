@@ -31,6 +31,7 @@ struct Settings {
   float hudWidth = 0.9f;        // metres wide (the panel covers the whole game screen)
   float hudDown = 0.125f;       // metres below eye level
   float hudTiltDeg = 12.0f;     // tilted back so it faces up towards you
+  bool swapEyeOrder = false;     // render the right eye first (diagnostic)
   bool bench = false;           // render stereo even while the headset is asleep (for profiling)
 };
 

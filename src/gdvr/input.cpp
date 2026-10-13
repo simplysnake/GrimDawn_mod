@@ -9,6 +9,7 @@
 #include <atomic>
 #include <iterator>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -75,8 +76,9 @@ const Binding kIndexBindings[] = {
     {kB, "/user/hand/right/input/b/click"},
     {kX, "/user/hand/left/input/a/click"},
     {kY, "/user/hand/left/input/b/click"},
-    {kLB, "/user/hand/left/input/squeeze/value"},
-    {kRB, "/user/hand/right/input/squeeze/value"},
+    // Index grip "value" reads high just from holding the controller; use squeeze force instead.
+    {kLB, "/user/hand/left/input/squeeze/force"},
+    {kRB, "/user/hand/right/input/squeeze/force"},
     {kLT, "/user/hand/left/input/trigger/value"},
     {kRT, "/user/hand/right/input/trigger/value"},
     {kLStickClick, "/user/hand/left/input/thumbstick/click"},
@@ -145,6 +147,35 @@ bool g_padActive = false;     // some VR controller action is bound and active
 DWORD g_padPacket = 0;
 bool g_lastRecenter = false;
 
+// Pressing both stick clicks together recentres the view. Stick clicks are held back briefly so
+// that the first stick of the chord does not reach the game on its own.
+constexpr ULONGLONG kChordWindowMs = 100;
+constexpr int kTapPulseFrames = 3;   // a quick tap is replayed to the game for this many frames
+struct StickClick {
+  bool down = false;
+  ULONGLONG downAt = 0;
+  int pulse = 0;
+};
+StickClick g_clickL, g_clickR;
+bool g_chordActive = false;
+
+// Updates one stick click; returns whether the game should see it pressed.
+bool GateClick(StickClick& c, bool raw, ULONGLONG now) {
+  if (raw && !c.down) {
+    c.down = true;
+    c.downAt = now;
+  } else if (!raw && c.down) {
+    c.down = false;
+    if (now - c.downAt < kChordWindowMs && !g_chordActive) c.pulse = kTapPulseFrames;
+  }
+  bool out = raw && now - c.downAt >= kChordWindowMs && !g_chordActive;
+  if (c.pulse > 0) {
+    --c.pulse;
+    out = true;
+  }
+  return out;
+}
+
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 XInputGetStateFn g_origGetState = nullptr;
 std::atomic<int> g_inFlight{0};
@@ -182,6 +213,23 @@ DWORD WINAPI HookXInputGetState(DWORD userIndex, XINPUT_STATE* state) {
       packet = g_padPacket;
     }
     if (result == ERROR_SUCCESS) g_realPadSeen = 1;
+    // Diagnostic: when anything is moving or pressed, log real and virtual pad (at most every 300 ms).
+    {
+      static ULONGLONG lastLog = 0;
+      const XINPUT_GAMEPAD& r = state->Gamepad;
+      auto busy = [](const XINPUT_GAMEPAD& g) {
+        return g.wButtons || g.bLeftTrigger > 30 || g.bRightTrigger > 30 || std::abs(g.sThumbLX) > 8000 ||
+               std::abs(g.sThumbLY) > 8000 || std::abs(g.sThumbRX) > 8000 || std::abs(g.sThumbRY) > 8000;
+      };
+      const bool realBusy = result == ERROR_SUCCESS && busy(r);
+      if ((realBusy || (active && busy(pad))) && GetTickCount64() - lastLog > 300) {
+        lastLog = GetTickCount64();
+        Log("pad: real(%s) btn %04X L %6d %6d R %6d %6d T %3d %3d | vr(%s) btn %04X L %6d %6d R %6d %6d T %3d %3d",
+            result == ERROR_SUCCESS ? "on" : "off", r.wButtons, r.sThumbLX, r.sThumbLY, r.sThumbRX, r.sThumbRY,
+            r.bLeftTrigger, r.bRightTrigger, active ? "on" : "off", pad.wButtons, pad.sThumbLX, pad.sThumbLY,
+            pad.sThumbRX, pad.sThumbRY, pad.bLeftTrigger, pad.bRightTrigger);
+      }
+    }
     if (active) {
       if (result != ERROR_SUCCESS) {
         std::memset(state, 0, sizeof(*state));
@@ -322,9 +370,25 @@ bool Sync(XrSession session, bool focused) {
       for (const auto& b : buttons)
         if (getBool(b.id)) pad.wButtons |= b.bit;
 
+      // Both stick clicks = recentre (and neither click goes to the game).
+      const ULONGLONG now = GetTickCount64();
+      const bool rawL = pad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB, rawR = pad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB;
+      bool chordPressed = false;
+      if (rawL && rawR && !g_chordActive) {
+        g_chordActive = true;
+        chordPressed = true;
+      }
+      const bool outL = GateClick(g_clickL, rawL, now);
+      const bool outR = GateClick(g_clickR, rawR, now);
+      if (!rawL && !rawR) g_chordActive = false;
+      pad.wButtons &= ~(XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB);
+      if (outL) pad.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
+      if (outR) pad.wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
+
       const bool r = getBool(kRecenter);
-      recenter = r && !g_lastRecenter;
+      recenter = (r && !g_lastRecenter) || chordPressed;
       g_lastRecenter = r;
+      if (chordPressed) Log("input: recentre (both sticks)");
     }
   }
 

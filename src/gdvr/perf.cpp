@@ -27,9 +27,12 @@ using GenericFn = uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uint
 struct Stage {
   const char* name;
   const char* symbol;
+  bool boolArg = false;                   // log how many calls passed true
+  std::atomic<int> trueCalls{0};
   GenericFn original = nullptr;
   std::atomic<int64_t> ticks{0};
   std::atomic<int> calls{0};
+  std::atomic<int> eyeCalls[2] = {0, 0};  // calls made while rendering eye 0 / eye 1
 };
 
 Stage g_stages[] = {
@@ -50,10 +53,21 @@ Stage g_stages[] = {
     {"RenderPostEffects", "?RenderPostEffects@GraphicsMTRenderer@GAME@@IEAAXAEBVCamera@2@PEBVRegion@2@AEBVViewport@2@@Z"},
     {"FrameBufferCopy", "?UpdateFrameBufferCopy@GraphicsMTRenderer@GAME@@IEAAXXZ"},
     {"RenderBackground", "?RenderBackground@GraphicsMTRenderer@GAME@@IEBAXAEBVViewport@2@@Z"},
+    {"Def.PrepareScene", "?ExecutePrepareScene@GraphicsDeferredRenderer@GAME@@UEAAXAEAVGraphicsScene@2@PEBULightEntry@2@@Z"},
+    {"Def.SceneGlow", "?RenderSceneGlow@GraphicsDeferredRenderer@GAME@@AEAAXAEBVGraphicsScene@2@@Z"},
+    {"Def.Fog", "?RenderFog@GraphicsDeferredRenderer@GAME@@AEAAXAEBVGraphicsScene@2@@Z"},
+    {"Def.FinalScene", "?RenderFinalScene@GraphicsDeferredRenderer@GAME@@UEAAXAEAVGraphicsScene@2@@Z"},
+    {"Def.Stencil", "?RenderStencilBuffer@GraphicsDeferredRenderer@GAME@@AEAAXAEBVViewport@2@HAEBVColor@2@@Z"},
+    // Highlight / outline setters (diagnostic for "glow only in one eye"); first arg is a bool.
+    {"Mesh.SetOutlined", "?SetOutlined@GraphicsMeshInstance@GAME@@QEAAX_N@Z", true},
+    {"Mesh.SetOutlineColor", "?SetOutlineColor@GraphicsMeshInstance@GAME@@QEAAXAEBVColor@2@@Z"},
+    {"Actor.EnableOutline", "?EnableOutline@Actor@GAME@@UEAAX_N@Z", true},
+    {"Actor.SetHighlight", "?SetHighlight@Actor@GAME@@UEAAX_N@Z", true},
 };
 constexpr int kStageCount = int(std::size(g_stages));
 
 std::atomic<int> g_inFlight{0};
+std::atomic<int> g_currentEye{-1};
 
 int64_t Ticks() {
   LARGE_INTEGER t;
@@ -73,6 +87,8 @@ uintptr_t StageDetour(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintpt
   const uintptr_t r = g_stages[I].original(a, b, c, d, e, f, g, h);
   g_stages[I].ticks += Ticks() - t0;
   ++g_stages[I].calls;
+  if (g_stages[I].boolArg && (b & 0xFF)) ++g_stages[I].trueCalls;
+  if (const int eye = g_currentEye.load(); eye >= 0) ++g_stages[I].eyeCalls[eye];
   --g_inFlight;
   return r;
 }
@@ -149,7 +165,7 @@ void LogWindow(double seconds) {
   const Window& w = g_win;
   if (!w.frames) return;
   const double n = w.frames;
-  char line[2048];
+  char line[4096];
   int len = snprintf(line, sizeof(line), "perf: %.0f fps | cpu frame %.1f ms, xr wait %.1f, eye cpu %.1f + %.1f",
                      n / seconds, w.frameMs / n, w.waitMs / n, w.eyeCpu[0] / n, w.eyeCpu[1] / n);
   if (w.gpuSamples) {
@@ -166,8 +182,11 @@ void LogWindow(double seconds) {
     const int calls = g_stages[i].calls.exchange(0);
     const double msPerFrame = TicksToMs(ticks - g_stageBase[i]) / n;
     g_stageBase[i] = ticks;
+    const int e0 = g_stages[i].eyeCalls[0].exchange(0), e1 = g_stages[i].eyeCalls[1].exchange(0);
+    const int t = g_stages[i].trueCalls.exchange(0);
     if (calls)
-      len += snprintf(line + len, sizeof(line) - len, " %s %.2f (%.1f)", g_stages[i].name, msPerFrame, calls / n);
+      len += snprintf(line + len, sizeof(line) - len, " %s %.2f (%.1f; L%.1f R%.1f%s)", g_stages[i].name, msPerFrame,
+                      calls / n, e0 / n, e1 / n, g_stages[i].boolArg ? (" true " + std::to_string(t)).c_str() : "");
   }
   Log("%s", line);
 }
@@ -198,6 +217,8 @@ void Mark(GpuMark mark) {
 }
 
 void AddEyeCpu(int eye, double ms) { g_win.eyeCpu[eye & 1] += ms; }
+
+void SetCurrentEye(int eye) { g_currentEye = eye; }
 
 void OnPresent(ID3D11Device* device, ID3D11DeviceContext* context, double xrWaitMs) {
   if (!g_context) {

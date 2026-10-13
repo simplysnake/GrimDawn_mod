@@ -17,6 +17,9 @@ bool InstallStageHooks(HMODULE engine);
 // Records a GPU timestamp (call on the render thread).
 void Mark(GpuMark mark);
 
+// Which eye is being rendered (-1 = none); stage calls are counted per eye.
+void SetCurrentEye(int eye);
+
 // CPU time of the eye renders this frame (ms).
 void AddEyeCpu(int eye, double ms);
 
