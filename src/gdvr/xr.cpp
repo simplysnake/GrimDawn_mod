@@ -424,7 +424,13 @@ void OnPresent(IDXGISwapChain* swapChain) {
 
   // Hotkeys: F7 cycles the mask (on -> distance rings -> off), F9 cycles Off -> Screen -> Stereo,
   // F10 recentres.
-  static bool f7Was = false, f9Was = false, f10Was = false;
+  static bool f6Was = false, f7Was = false, f9Was = false, f10Was = false;
+  const bool f6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+  if (f6 && !f6Was) {
+    g_settings.swapEyeOrder = !g_settings.swapEyeOrder;
+    Log("eye order -> %s first", g_settings.swapEyeOrder ? "right" : "left");
+  }
+  f6Was = f6;
   const bool f7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
   if (f7 && !f7Was) {
     if (g_settings.maskEnabled && !g_settings.maskDebug) {

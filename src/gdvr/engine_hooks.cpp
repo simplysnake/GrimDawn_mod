@@ -11,6 +11,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <cmath>
 
@@ -147,6 +148,36 @@ void FitFrustum(gd::Camera* cam, const gd::Viewport* viewport, int eye, float fo
   ReadTanFov(cam, viewport, tanX, tanY);
 }
 
+// ---- Diagnostic: find renderer state that flips on every Render call ------------------------
+// Snapshots the GraphicsMTRenderer object before the first eye, after it, and after the second
+// eye, and reports 32-bit words that change on each call and change back (double buffering).
+constexpr size_t kSnapWords = 4096;  // 16 KB
+int g_toggleDiagFrames = 0;          // frames left to sample
+std::vector<int> g_toggleHits;
+
+size_t ReadableWords(const void* p) {
+  MEMORY_BASIC_INFORMATION mbi;
+  if (!VirtualQuery(p, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) return 0;
+  const size_t avail = (static_cast<const uint8_t*>(mbi.BaseAddress) + mbi.RegionSize) - static_cast<const uint8_t*>(p);
+  return std::min(kSnapWords, avail / 4);
+}
+
+void ToggleDiag(const void* renderer, const std::vector<uint32_t>& s0, const std::vector<uint32_t>& s1,
+                const std::vector<uint32_t>& s2) {
+  if (g_toggleHits.size() < s0.size()) g_toggleHits.assign(s0.size(), 0);
+  for (size_t i = 0; i < s0.size(); ++i)
+    if (s0[i] != s1[i] && s0[i] == s2[i]) ++g_toggleHits[i];
+  if (--g_toggleDiagFrames > 0) return;
+  int logged = 0;
+  for (size_t i = 0; i < g_toggleHits.size() && logged < 40; ++i)
+    if (g_toggleHits[i] >= 5) {
+      Log("toggle: renderer+0x%04zX flips every Render (%d/6 frames): %08X -> %08X", i * 4, g_toggleHits[i], s0[i], s1[i]);
+      ++logged;
+    }
+  Log("toggle: %d candidate words (renderer %p)", logged, renderer);
+  g_toggleHits.clear();
+}
+
 // Renders the scene once per eye: the game camera is replaced by the eye's camera
 // (game camera + head pose), the result is captured for the headset, and the camera is restored.
 void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Region* region,
@@ -175,6 +206,13 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
 
   // Frustum objects are built in place by the engine (size unknown, so over-allocate).
   alignas(16) static unsigned char frustumBuf[2][4096];
+
+  std::vector<uint32_t> snaps[3];
+  const size_t snapWords = g_toggleDiagFrames > 0 ? ReadableWords(self) : 0;
+  auto snap = [&](int k) {
+    if (snapWords) snaps[k].assign(reinterpret_cast<const uint32_t*>(self), reinterpret_cast<const uint32_t*>(self) + snapWords);
+  };
+  snap(0);
 
   for (int pass = 0; pass < 2; ++pass) {
     const int eye = s.swapEyeOrder ? 1 - pass : pass;
@@ -233,7 +271,9 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     }
     xr::CaptureEye(eye, tanX, tanY);
     perf::Mark(pass == 0 ? perf::kEye0End : perf::kEye1End);
+    snap(pass + 1);
   }
+  if (snapWords) ToggleDiag(self, snaps[0], snaps[1], snaps[2]);
 
   // Both eyes are captured: from here on the game draws its HUD, onto a transparent back buffer.
   xr::PrepareHud();
@@ -352,6 +392,11 @@ void PollControlFile() {
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
   vr.bench = getInt(L"bench", vr.bench) != 0;
   vr.swapEyeOrder = getInt(L"swap_eye_order", vr.swapEyeOrder) != 0;
+  static int lastToggleDiag = 0;
+  if (int t = getInt(L"diag_toggle", lastToggleDiag); t != lastToggleDiag) {
+    lastToggleDiag = t;
+    g_toggleDiagFrames = 6;
+  }
   vr.hud = getInt(L"hud", vr.hud) != 0;
   vr.hudDistance = getFloat(L"hud_distance", vr.hudDistance);
   vr.hudWidth = getFloat(L"hud_width", vr.hudWidth);

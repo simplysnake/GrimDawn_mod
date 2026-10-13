@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "log.h"
+#include "xr.h"
 
 namespace gdvr::input {
 
@@ -243,6 +244,23 @@ DWORD WINAPI HookXInputGetState(DWORD userIndex, XINPUT_STATE* state) {
       MergeStick(g.sThumbRX, g.sThumbRY, pad.sThumbRX, pad.sThumbRY);
       state->dwPacketNumber += packet;  // changes whenever either source changes
     }
+    if (result == ERROR_SUCCESS) {
+      // Both stick clicks on any controller = recentre; neither click reaches the game.
+      WORD& b = state->Gamepad.wButtons;
+      const ULONGLONG now = GetTickCount64();
+      const bool rawL = b & XINPUT_GAMEPAD_LEFT_THUMB, rawR = b & XINPUT_GAMEPAD_RIGHT_THUMB;
+      if (rawL && rawR && !g_chordActive) {
+        g_chordActive = true;
+        xr::RequestRecenter();
+        Log("input: recentre (both sticks)");
+      }
+      const bool outL = GateClick(g_clickL, rawL, now);
+      const bool outR = GateClick(g_clickR, rawR, now);
+      if (!rawL && !rawR) g_chordActive = false;
+      const WORD gated = WORD((outL ? XINPUT_GAMEPAD_LEFT_THUMB : 0) | (outR ? XINPUT_GAMEPAD_RIGHT_THUMB : 0));
+      if ((b & (XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB)) != gated) state->dwPacketNumber += 0x10000;
+      b = WORD((b & ~(XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB)) | gated);
+    }
   }
   --g_inFlight;
   return result;
@@ -370,25 +388,9 @@ bool Sync(XrSession session, bool focused) {
       for (const auto& b : buttons)
         if (getBool(b.id)) pad.wButtons |= b.bit;
 
-      // Both stick clicks = recentre (and neither click goes to the game).
-      const ULONGLONG now = GetTickCount64();
-      const bool rawL = pad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB, rawR = pad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB;
-      bool chordPressed = false;
-      if (rawL && rawR && !g_chordActive) {
-        g_chordActive = true;
-        chordPressed = true;
-      }
-      const bool outL = GateClick(g_clickL, rawL, now);
-      const bool outR = GateClick(g_clickR, rawR, now);
-      if (!rawL && !rawR) g_chordActive = false;
-      pad.wButtons &= ~(XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB);
-      if (outL) pad.wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
-      if (outR) pad.wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
-
       const bool r = getBool(kRecenter);
-      recenter = (r && !g_lastRecenter) || chordPressed;
+      recenter = r && !g_lastRecenter;
       g_lastRecenter = r;
-      if (chordPressed) Log("input: recentre (both sticks)");
     }
   }
 
