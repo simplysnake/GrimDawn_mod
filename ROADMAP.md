@@ -64,6 +64,16 @@ with the devotion constellations as the sky.
 
 ### 10. In-VR settings panel – medium
 - Adjust scale, mask, HUD and bindings with a controller instead of editing `control.ini`.
+- **Per-element HUD placement** (sub-job):
+  - Split the HUD into separate floating elements (health globe, energy globe, skill bar, minimap,
+    quest list, buffs, open windows such as inventory) – each its own panel.
+  - Per element: distance from the face (closer / further) and vertical offset (up / down).
+  - Each element turns to face the user every frame (billboarded toward the head).
+  - Implementation: all elements share the one captured HUD image; each is a separate OpenXR quad layer
+    showing just its rectangle of it (`subImage.imageRect`), so no extra rendering. Element rectangles
+    come from the game's UI layout (resolution / UI-scale dependent) – start with a fixed layout table,
+    later read them from the game's UI widgets.
+  - Settings saved per element; sensible defaults (e.g. globes low at the sides, minimap high on one side).
 
 ### 11. Distribution (if shared) – medium
 - Auto-detect game path; detect game version and fail safely after patches; one-click install.
