@@ -76,6 +76,15 @@ struct Experiments {
 };
 Experiments g_exp;  // plain struct; torn reads are harmless for a debug tool
 
+// While VR is on, the game must keep running when its window loses focus (SteamVR dashboard,
+// clicking another window): report the window as active. Input stays focus-gated in DirectInput.
+gd::WinWindowIsActiveFn g_origIsActive = nullptr;
+
+bool HookIsActive(void* self) {
+  if (xr::GetSettings().mode != xr::Mode::Off && xr::GetSettings().keepRunningUnfocused) return true;
+  return g_origIsActive(self);
+}
+
 struct InFlightGuard {
   InFlightGuard() { ++g_inFlight; }
   ~InFlightGuard() { --g_inFlight; }
@@ -551,6 +560,7 @@ void PollControlFile() {
   vr.screenDistance = getFloat(L"screen_distance", vr.screenDistance);
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
   vr.bench = getInt(L"bench", vr.bench) != 0;
+  vr.keepRunningUnfocused = getInt(L"keep_running_unfocused", vr.keepRunningUnfocused) != 0;
   mask::SetDepthHistoryMode(std::clamp(getInt(L"depth_history", mask::DepthHistoryMode()), 0, 2));
   vr.swapEyeOrder = getInt(L"swap_eye_order", vr.swapEyeOrder) != 0;
   {
@@ -652,6 +662,11 @@ bool Install() {
   ok &= Resolve(engine, gd::kCameraGetFrustum, g_getFrustum);
   if (!ok) return false;
 
+
+  if (void* isActive = reinterpret_cast<void*>(GetProcAddress(engine, gd::kWinWindowIsActive)))
+    MH_CreateHook(isActive, reinterpret_cast<void*>(&HookIsActive), reinterpret_cast<void**>(&g_origIsActive));
+  else
+    Log("MISSING export: WinWindow::IsActive (game will pause when unfocused)");
 
   MH_STATUS st = MH_CreateHook(render, reinterpret_cast<void*>(&HookRender),
                                reinterpret_cast<void**>(&g_origRender));

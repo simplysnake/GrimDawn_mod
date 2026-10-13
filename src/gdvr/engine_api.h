@@ -64,6 +64,12 @@ using CameraGetFrustumFn = Frustum* (*)(const Camera* self, Frustum* result, con
 inline constexpr char kRendererGetCameraTarget[] = "?GetCameraTarget@GraphicsMTRenderer@GAME@@QEBAAEBVWorldVec3@2@XZ";
 using RendererGetCameraTargetFn = const float* (*)(const GraphicsMTRenderer* self);
 
+// bool WinWindow::IsActive()  (virtual) - the engine's "is the game window in front?" check; it is
+// the only caller of GetForegroundWindow in Engine.dll and drives the pause when unfocused
+// (inactiveUpdateRate). Keyboard/mouse focus is checked separately in DirectInput.dll.
+inline constexpr char kWinWindowIsActive[] = "?IsActive@WinWindow@GAME@@UEAA_NXZ";
+using WinWindowIsActiveFn = bool (*)(void* self);
+
 // int Viewport::GetWidth/GetHeight() const
 inline constexpr char kViewportGetWidth[] = "?GetWidth@Viewport@GAME@@QEBAHXZ";
 inline constexpr char kViewportGetHeight[] = "?GetHeight@Viewport@GAME@@QEBAHXZ";

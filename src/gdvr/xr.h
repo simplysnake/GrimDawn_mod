@@ -32,6 +32,7 @@ struct Settings {
   float hudDown = 0.125f;       // metres below eye level
   float hudTiltDeg = 12.0f;     // tilted back so it faces up towards you
   bool swapEyeOrder = false;     // render the right eye first (diagnostic)
+  bool keepRunningUnfocused = true;  // don't pause when the game window loses focus
   bool bench = false;           // render stereo even while the headset is asleep (for profiling)
 };
 

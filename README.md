@@ -52,4 +52,6 @@ Log: `%LOCALAPPDATA%\gdvr\gdvr.log`
   right trackpad press = Start, left trackpad press = Back. D-pad and Recenter are unbound by default.
   Remap everything in SteamVR: Settings > Controllers > Manage Controller Bindings > Grim Dawn VR.
   SteamVR's *Reset View* also recentres.
+- While VR is on the game keeps running when its window is unfocused (SteamVR dashboard, other windows);
+  keyboard and mouse still only reach the game when it is focused. `keep_running_unfocused=0` disables this.
 - The game must run windowed with vsync off: `tools\apply_vr_settings.ps1` applies recommended settings after the game exits.
