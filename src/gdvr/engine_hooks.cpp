@@ -58,6 +58,9 @@ gd::CameraSetFloatFn g_setFov = nullptr, g_setAspect = nullptr, g_setFar = nullp
 gd::CameraGetProjectionFn g_getProj = nullptr;
 gd::CameraGetFrustumFn g_getFrustum = nullptr;
 gd::RendererGetCameraTargetFn g_cameraTarget = nullptr;
+gd::WorldFrustumInitializeFn g_wfInit = nullptr;
+gd::WorldFrustumGetRegionFn g_wfRegion = nullptr;
+bool g_eyeWorldFrustum = true;  // F4 toggles: per-eye world frustum (shadows / culling follow the eye)
 
 std::atomic<int> g_inFlight{0};
 std::mutex g_mutex;
@@ -343,6 +346,29 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     if (s.recomputeFrustum)
       eyeFrustum = g_getFrustum(camera, reinterpret_cast<gd::Frustum*>(frustumBuf[eye]), viewport);
 
+    // The world frustum (region culling, shadow fitting) came from the game's own camera; rebuild
+    // it from this eye's frustum so shadows and culling follow the eye. Copy the original first so
+    // any fields Initialize doesn't touch stay valid.
+    const gd::WorldFrustum* eyeWorldFrustum = worldFrustum;
+    {
+      static bool f4Was = false;
+      const bool f4 = (GetAsyncKeyState(VK_F4) & 0x8000) != 0;
+      if (pass == 0 && f4 && !f4Was) {
+        g_eyeWorldFrustum = !g_eyeWorldFrustum;
+        Log("per-eye world frustum -> %s", g_eyeWorldFrustum ? "on" : "off");
+      }
+      if (pass == 0) f4Was = f4;
+    }
+    if (g_eyeWorldFrustum && s.recomputeFrustum && worldFrustum) {
+      // Layout: Region*, plane count, planes (plain data, ~0x80 bytes).
+      alignas(16) static unsigned char worldFrustumBuf[2][256];
+      const size_t avail = ReadableWords(worldFrustum) * 4;
+      std::memcpy(worldFrustumBuf[eye], worldFrustum, std::min(avail, sizeof(worldFrustumBuf[eye])));
+      auto* wf = reinterpret_cast<gd::WorldFrustum*>(worldFrustumBuf[eye]);
+      g_wfInit(wf, g_wfRegion(worldFrustum), eyeFrustum);
+      eyeWorldFrustum = wf;
+    }
+
     if (pass == 0) perf::Mark(perf::kEye0Begin);
     const double t0 = NowMs();
     mask::BeginCapture(unsigned(g_vpWidth(viewport)), unsigned(g_vpHeight(viewport)), s.maskDepthPick);
@@ -361,7 +387,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     if (!g_bumpAddress) g_bumpAddress = ResolveBump(kDefaultBump);
     uint32_t* bump = pass == 1 && g_bumpEnabled ? g_bumpAddress : nullptr;
     if (bump) ++*bump;
-    g_origRender(self, camera, region, viewport, eyeFrustum, flags, flag2, worldFrustum);
+    g_origRender(self, camera, region, viewport, eyeFrustum, flags, flag2, eyeWorldFrustum);
     if (bump) --*bump;
     d3dtrace::SetEye(-1);
     perf::SetCurrentEye(-1);
@@ -594,6 +620,8 @@ bool Install() {
   ok &= Resolve(engine, gd::kCameraSetAspect, g_setAspect);
   ok &= Resolve(engine, gd::kCameraSetFar, g_setFar);
   ok &= Resolve(engine, gd::kRendererGetCameraTarget, g_cameraTarget);
+  ok &= Resolve(engine, gd::kWorldFrustumInitialize, g_wfInit);
+  ok &= Resolve(engine, gd::kWorldFrustumGetRegion, g_wfRegion);
   ok &= Resolve(engine, gd::kCameraGetProjection, g_getProj);
   ok &= Resolve(engine, gd::kCameraGetFrustum, g_getFrustum);
   if (!ok) return false;

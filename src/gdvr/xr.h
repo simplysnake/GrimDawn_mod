@@ -25,7 +25,7 @@ struct Settings {
   float maskDepthStart = 0.85f; // fraction of the far plane where the far-plane fade starts
   float maskStrength = 1.0f;    // 0..1
   bool maskDebug = false;       // distance rings (green inside, red fading, blue black)
-  int maskDepthPick = -1;       // which screen-sized depth buffer to use: -1 = last bound, 0/1 = first/second
+  int maskDepthPick = 0;        // which screen-sized depth buffer: 0 = first bound (the G-buffer pass, cleared per eye), -1 = last
   bool hud = true;              // show the game's HUD on a floating panel in stereo mode
   float hudDistance = 0.7f;     // metres in front of the recentred position
   float hudWidth = 0.9f;        // metres wide (the panel covers the whole game screen)

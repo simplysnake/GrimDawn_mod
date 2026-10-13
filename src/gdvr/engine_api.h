@@ -64,6 +64,12 @@ using CameraGetFrustumFn = Frustum* (*)(const Camera* self, Frustum* result, con
 inline constexpr char kRendererGetCameraTarget[] = "?GetCameraTarget@GraphicsMTRenderer@GAME@@QEBAAEBVWorldVec3@2@XZ";
 using RendererGetCameraTargetFn = const float* (*)(const GraphicsMTRenderer* self);
 
+// void WorldFrustum::Initialize(Region*, const Frustum&) / Region* WorldFrustum::GetRegion() const
+inline constexpr char kWorldFrustumInitialize[] = "?Initialize@WorldFrustum@GAME@@QEAAXPEAVRegion@2@AEBVFrustum@2@@Z";
+inline constexpr char kWorldFrustumGetRegion[] = "?GetRegion@WorldFrustum@GAME@@QEBAPEAVRegion@2@XZ";
+using WorldFrustumInitializeFn = void (*)(WorldFrustum* self, Region* region, const Frustum* frustum);
+using WorldFrustumGetRegionFn = Region* (*)(const WorldFrustum* self);
+
 // int Viewport::GetWidth/GetHeight() const
 inline constexpr char kViewportGetWidth[] = "?GetWidth@Viewport@GAME@@QEBAHXZ";
 inline constexpr char kViewportGetHeight[] = "?GetHeight@Viewport@GAME@@QEBAHXZ";
