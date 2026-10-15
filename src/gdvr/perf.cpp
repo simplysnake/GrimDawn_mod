@@ -193,10 +193,14 @@ void CollectGpu(GpuSlot& s) {
   }
 }
 
+double g_lastFps = 0, g_lastFrameMs = 0;
+
 void LogWindow(double seconds) {
   const Window& w = g_win;
   if (!w.frames) return;
   const double n = w.frames;
+  g_lastFps = n / seconds;
+  g_lastFrameMs = w.frameMs / n;
   char line[4096];
   int len = snprintf(line, sizeof(line), "perf: %.0f fps | cpu frame %.1f ms, xr wait %.1f, eye cpu %.1f + %.1f",
                      n / seconds, w.frameMs / n, w.waitMs / n, w.eyeCpu[0] / n, w.eyeCpu[1] / n);
@@ -294,6 +298,8 @@ void OnPresent(ID3D11Device* device, ID3D11DeviceContext* context, double xrWait
 }
 
 int InFlight() { return g_inFlight.load(); }
+double LastFps() { return g_lastFps; }
+double LastFrameMs() { return g_lastFrameMs; }
 
 void Shutdown() {
   for (GpuSlot& s : g_slots) {

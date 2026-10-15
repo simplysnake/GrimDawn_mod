@@ -40,6 +40,9 @@ struct HudLook {
   float halo = 0.0f;        // strength of the dark halo behind HUD elements (0 = off)
   float haloRadius = 3.0f;  // halo size in pixels
   float alphaBoost = 1.0f;  // opacity from brightness x this (makes dark HUD parts solid)
+  // A top-right block of the HUD (fractions of the image) drawn shifted left by sideShift (fraction of width).
+  float sideWidth = 0, sideHeight = 0, sideShift = 0;
+  bool sideOutline = false;
 };
 bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look);
 
@@ -48,6 +51,9 @@ bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look);
 void MeasureBrightness(IDXGISwapChain* swapChain);
 // Latest average brightness of the scene, 0..1 (gamma space), or -1 if not measured yet.
 float SceneBrightness();
+
+// Average coverage of the finished HUD image (0..1), or -1 before the first reading. Menus raise it.
+float HudCoverage();
 
 // ---- Per-eye depth history ---------------------------------------------------------------
 // The engine's geometry pass samples a copy of the PREVIOUS render's depth (soft blending of

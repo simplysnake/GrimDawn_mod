@@ -429,7 +429,6 @@ void OnInteractionProfileChanged(XrInstance instance, XrSession session) {
 int InFlight() { return g_inFlight.load(); }
 
 void DrawDebugUI() {
-  if (!ImGui::CollapsingHeader("Input", ImGuiTreeNodeFlags_DefaultOpen)) return;
   XINPUT_GAMEPAD p;
   bool active;
   {

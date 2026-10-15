@@ -612,6 +612,11 @@ void PollControlFile() {
   vr.hudWidth = getFloat(L"hud_width", vr.hudWidth);
   vr.hudDown = getFloat(L"hud_down", vr.hudDown);
   vr.hudTiltDeg = getFloat(L"hud_tilt", vr.hudTiltDeg);
+  vr.hudSideShift = getFloat(L"hud_side_shift", vr.hudSideShift);
+  vr.hudSideWidth = getFloat(L"hud_side_width", vr.hudSideWidth);
+  vr.hudSideHeight = getFloat(L"hud_side_height", vr.hudSideHeight);
+  vr.hudMenuCoverage = getFloat(L"hud_menu_coverage", vr.hudMenuCoverage);
+  vr.hudSideOutline = getInt(L"hud_side_outline", vr.hudSideOutline) != 0;
   vr.hudBrightness = getFloat(L"hud_brightness", vr.hudBrightness);
   vr.hudOpacity = getFloat(L"hud_opacity", vr.hudOpacity);
   vr.hudDayAdapt = getInt(L"hud_day_adapt", vr.hudDayAdapt) != 0;
@@ -717,43 +722,14 @@ void OnFramePresented() {
 int InFlight() { return g_inFlight.load(); }
 
 void DrawDebugUI() {
-  Frame frame;
-  {
-    std::lock_guard lock(g_mutex);
-    frame = g_published;
-  }
-
   const float scale = ImGui::GetIO().FontGlobalScale;
-  ImGui::SetNextWindowSize(ImVec2(560 * scale, 620 * scale), ImGuiCond_FirstUseEver);
-  ImGui::Begin("Grim Dawn VR - debug (F8 to hide)");
-
-  ImGui::Text("GraphicsMTRenderer::Render calls last frame: %d", frame.count);
-  ImGui::Separator();
-
-  for (int i = 0; i < frame.count && i < kMaxCalls; ++i) {
-    const RenderCall& c = frame.calls[i];
-    ImGui::Text("Call %d  camera=%p  viewport=%dx%d  flags=0x%X  flag2=%d", i, c.camera, c.vpWidth,
-                c.vpHeight, c.flags, int(c.flag2));
-    ImGui::Text("FOV=%.4f  near=%.3f  far=%.3f  aspect=%.4f", c.fov, c.nearPlane, c.farPlane, c.aspect);
-    ImGui::Text("Render: %.3f ms   duplicate: %.3f ms", c.ms, c.extraMs);
-    ImGui::TextUnformatted("Coords (raw floats; watch which change when you walk / rotate):");
-    for (int row = 0; row < kCoordsFloats / 4; ++row)
-      ImGui::Text("  [%2d] %10.3f %10.3f %10.3f %10.3f", row * 4, c.coords[row * 4], c.coords[row * 4 + 1],
-                  c.coords[row * 4 + 2], c.coords[row * 4 + 3]);
-    ImGui::Separator();
-  }
-
-  if (ImGui::CollapsingHeader("Experiments", ImGuiTreeNodeFlags_DefaultOpen)) {
-    ImGui::Checkbox("Offset camera", &g_exp.offsetEnabled);
-    ImGui::SliderInt("Origin index in Coords", &g_exp.originIndex, 0, kCoordsCopy - 3);
-    ImGui::DragFloat3("Offset", g_exp.offset, 0.05f, -50.f, 50.f);
-    ImGui::SliderInt("Apply to call (-1 = all)", &g_exp.targetCall, -1, kMaxCalls - 1);
-    if (ImGui::Button("Reset offset")) g_exp.offset[0] = g_exp.offset[1] = g_exp.offset[2] = 0;
-    ImGui::Spacing();
-    ImGui::Checkbox("Render scene twice (cost / stability test)", &g_exp.renderTwice);
-  }
+  ImGui::SetNextWindowSize(ImVec2(520 * scale, 640 * scale), ImGuiCond_FirstUseEver);
+  ImGui::Begin("Grim Dawn VR  (F8 hide)");
   xr::DrawDebugUI();
-  input::DrawDebugUI();
+  if (ImGui::CollapsingHeader("Diagnostics")) {
+    xr::DrawDiagnostics();
+    input::DrawDebugUI();
+  }
   ImGui::End();
 }
 

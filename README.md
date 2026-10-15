@@ -46,6 +46,8 @@ Log: `%LOCALAPPDATA%\gdvr\gdvr.log`
   `far_plane` (default 70), `mask`, `mask_inner`/`mask_outer` (fade distances from the player, default 45/62),
   `mask_depth_start`, `mask_strength`, `mask_debug`, `mask_depth_pick`, `bench` (stereo while the headset sleeps).
   HUD panel: `hud`, `hud_distance`, `hud_width`, `hud_down`, `hud_tilt` (metres / degrees).
+  Minimap + quest block (top right of the HUD) moved left: `hud_side_shift` (fraction of the HUD width),
+  `hud_side_width` / `hud_side_height` (block size, fractions from the top-right corner).
   HUD look (sliders in the F8 debug window, **Save settings** writes them here): `hud_brightness`, `hud_opacity`,
   `hud_alpha_boost` (makes dark HUD parts solid), dark backing behind the HUD for night and day:
   `hud_halo` / `hud_halo_radius` (night), `hud_halo_day` / `hud_halo_radius_day` (daylight), `hud_day_adapt`,

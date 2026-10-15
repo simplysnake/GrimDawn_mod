@@ -66,7 +66,8 @@ cbuffer Params : register(b0) {
   float4 fade;    // x inner, y outer (horizontal distance), z/w far-plane fade start/end (view depth)
   float4 color;   // a = strength
   float4 hud;     // HUD pass: x brightness, y opacity, z halo strength, w halo radius (px)
-  float4 hud2;    // HUD pass: x alpha boost
+  float4 hud2;    // HUD pass: x alpha boost, y side-block shift (px, + = left), z outline
+  float4 hud3;    // HUD pass: side block rect in px (x0, y0, x1, y1), as the game draws it
 };
 Texture2D<float> depthTex : register(t0);
 Texture2D<float4> hudTex : register(t0);
@@ -102,9 +103,28 @@ float4 PS(VSOut i) : SV_Target {
 // The boost makes dark-but-drawn pixels solid instead of see-through (which looked additive).
 float Coverage(float4 c) { return saturate(max(c.a, max(c.r, max(c.g, c.b)) * hud2.x)); }
 
+bool InRect(float2 p, float4 r) { return p.x >= r.x && p.x < r.z && p.y >= r.y && p.y < r.w; }
+
+// The HUD as shown: the side block appears shifted left, and its original place is left empty.
+float4 Hud(int2 p) {
+  float4 moved = hud3 - float4(hud2.y, 0, hud2.y, 0);
+  bool fromBlock = hud2.y != 0 && InRect(p, moved);
+  bool vacated = hud2.y != 0 && !fromBlock && InRect(p, hud3);
+  float4 here = hudTex.Load(int3(p, 0));
+  // Whatever the game draws where the block is moved to (a menu, a dialog) stays on top of it.
+  float4 block = hudTex.Load(int3(p + int2(hud2.y, 0), 0));
+  bool showBlock = fromBlock && Coverage(here) < 0.05;
+  return showBlock ? block : (vacated ? float4(0, 0, 0, 0) : here);
+}
+
 float4 PSHud(VSOut i) : SV_Target {
   int2 p = int2(i.pos.xy);
-  float4 c = hudTex.Load(int3(p, 0));
+  if (hud2.z > 0) {  // outline: red where the game draws the side block, green where it is shown
+    float4 moved = hud3 - float4(hud2.y, 0, hud2.y, 0);
+    if (InRect(p, moved + float4(-3, -3, 3, 3)) && !InRect(p, moved + float4(3, 3, -3, -3))) return float4(0, 1, 0, 1);
+    if (InRect(p, hud3 + float4(-3, -3, 3, 3)) && !InRect(p, hud3 + float4(3, 3, -3, -3))) return float4(1, 0, 0, 1);
+  }
+  float4 c = Hud(p);
   float a = Coverage(c);  // some HUD elements don't write alpha; colours are premultiplied over black
   // Soft dark halo: coverage of the neighbourhood (two rings), drawn as black behind the HUD.
   float halo = 0;
@@ -115,7 +135,7 @@ float4 PSHud(VSOut i) : SV_Target {
       float w = 1.0 - (ring - 1) * 0.3;
       [unroll] for (int k = 0; k < 12; ++k) {
         float2 dir = float2(cos(k * 0.5235988), sin(k * 0.5235988));
-        halo = max(halo, w * Coverage(hudTex.Load(int3(p + int2(round(dir * r)), 0))));
+        halo = max(halo, w * Coverage(Hud(p + int2(round(dir * r)))));
       }
     }
     halo *= hud.z;
@@ -125,7 +145,7 @@ float4 PSHud(VSOut i) : SV_Target {
 )";
 
 struct alignas(16) Constants {
-  float right[4], up[4], fwd[4], origin[4], target[4], fade[4], color[4], hud[4], hud2[4];
+  float right[4], up[4], fwd[4], origin[4], target[4], fade[4], color[4], hud[4], hud2[4], hud3[4];
 };
 
 template <typename T>
@@ -346,89 +366,102 @@ bool EnsureDeviceAndRtv(ID3D11Texture2D* bb) {
   return true;
 }
 
-// ---- Scene brightness: eye image -> mip chain -> 1x1, read back a few frames later ----------
-ID3D11Texture2D* g_lumTex = nullptr;
-ID3D11ShaderResourceView* g_lumSrv = nullptr;
-UINT g_lumMips = 0;
-constexpr int kLumSlots = 4;
-ID3D11Texture2D* g_lumStaging[kLumSlots] = {};
-bool g_lumPending[kLumSlots] = {};
-int g_lumCalls = 0;
-std::atomic<float> g_sceneLum{-1.0f};
+// ---- Image meters: texture -> mip chain -> 1x1 average, read back a few frames later -----------
+struct Meter {
+  const char* name;
+  float (*reduce)(const uint8_t* px, bool bgra);  // the 1x1 average pixel -> the value
+  ID3D11Texture2D* tex = nullptr;
+  ID3D11ShaderResourceView* srv = nullptr;
+  UINT mips = 0;
+  static constexpr int kSlots = 4;
+  ID3D11Texture2D* staging[kSlots] = {};
+  bool pending[kSlots] = {};
+  int calls = 0;
+  std::atomic<float> value{-1.0f};
+
+  void Release() {
+    SafeRelease(srv);
+    SafeRelease(tex);
+    for (auto*& st : staging) SafeRelease(st);
+    for (bool& b : pending) b = false;
+    mips = 0;
+  }
+
+  // Samples bb every 4th call. No stalls: results are read only once the GPU has finished them.
+  void Sample(ID3D11Texture2D* bb) {
+    if (calls++ % 4) return;
+    D3D11_TEXTURE2D_DESC bbDesc;
+    bb->GetDesc(&bbDesc);
+    if (tex) {
+      D3D11_TEXTURE2D_DESC d;
+      tex->GetDesc(&d);
+      if (d.Width != bbDesc.Width || d.Height != bbDesc.Height || d.Format != bbDesc.Format) Release();
+    }
+    if (!tex) {
+      D3D11_TEXTURE2D_DESC d = bbDesc;
+      d.MipLevels = 0;  // full chain down to 1x1
+      d.Usage = D3D11_USAGE_DEFAULT;
+      d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      d.CPUAccessFlags = 0;
+      d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+      D3D11_TEXTURE2D_DESC sd = bbDesc;
+      sd.Width = sd.Height = 1;
+      sd.MipLevels = 1;
+      sd.Usage = D3D11_USAGE_STAGING;
+      sd.BindFlags = 0;
+      sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      sd.MiscFlags = 0;
+      bool ok = SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &tex)) &&
+                SUCCEEDED(g_device->CreateShaderResourceView(tex, nullptr, &srv));
+      for (auto*& st : staging) ok = ok && SUCCEEDED(g_device->CreateTexture2D(&sd, nullptr, &st));
+      if (!ok) {
+        Log("hud: %s meter unavailable", name);
+        Release();
+        return;
+      }
+      tex->GetDesc(&d);
+      mips = d.MipLevels;
+    }
+    ID3D11DeviceContext* ctx = nullptr;
+    g_device->GetImmediateContext(&ctx);
+    const int slot = (calls / 4) % kSlots;
+    const int read = (slot + 1) % kSlots;  // the oldest pending result
+    if (pending[read]) {
+      D3D11_MAPPED_SUBRESOURCE mapped;
+      if (ctx->Map(staging[read], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped) == S_OK) {
+        const bool bgra = bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM || bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        value = reduce(static_cast<const uint8_t*>(mapped.pData), bgra);
+        ctx->Unmap(staging[read], 0);
+        pending[read] = false;
+      }
+    }
+    ctx->CopySubresourceRegion(tex, 0, 0, 0, 0, bb, 0, nullptr);
+    ctx->GenerateMips(srv);
+    ctx->CopySubresourceRegion(staging[slot], 0, 0, 0, 0, tex, mips - 1, nullptr);
+    pending[slot] = true;
+    ctx->Release();
+  }
+};
+
+// Scene brightness of an eye image (luminance).
+Meter g_sceneMeter{"brightness", [](const uint8_t* px, bool bgra) {
+                     const float r = (bgra ? px[2] : px[0]) / 255.0f, g = px[1] / 255.0f,
+                                 b = (bgra ? px[0] : px[2]) / 255.0f;
+                     return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                   }};
+// How much of the HUD image is covered (average alpha after the HUD pass): jumps when a menu opens.
+Meter g_hudMeter{"HUD coverage", [](const uint8_t* px, bool) { return px[3] / 255.0f; }};
 
 void MeasureBrightness(IDXGISwapChain* swapChain) {
   if (!g_capturingAllowed || g_failed || !swapChain) return;
-  if (g_lumCalls++ % 4) return;  // every 4th frame is plenty
   ID3D11Texture2D* bb = nullptr;
   if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) return;
-  if (!EnsureDeviceAndRtv(bb)) {
-    bb->Release();
-    return;
-  }
-  D3D11_TEXTURE2D_DESC bbDesc;
-  bb->GetDesc(&bbDesc);
-  if (g_lumTex) {
-    D3D11_TEXTURE2D_DESC d;
-    g_lumTex->GetDesc(&d);
-    if (d.Width != bbDesc.Width || d.Height != bbDesc.Height || d.Format != bbDesc.Format) {
-      SafeRelease(g_lumSrv);
-      SafeRelease(g_lumTex);
-      for (auto*& s : g_lumStaging) SafeRelease(s);
-    }
-  }
-  if (!g_lumTex) {
-    D3D11_TEXTURE2D_DESC d = bbDesc;
-    d.MipLevels = 0;  // full chain down to 1x1
-    d.Usage = D3D11_USAGE_DEFAULT;
-    d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    d.CPUAccessFlags = 0;
-    d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
-    D3D11_TEXTURE2D_DESC sd = bbDesc;
-    sd.Width = sd.Height = 1;
-    sd.MipLevels = 1;
-    sd.Usage = D3D11_USAGE_STAGING;
-    sd.BindFlags = 0;
-    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    sd.MiscFlags = 0;
-    bool ok = SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &g_lumTex)) &&
-              SUCCEEDED(g_device->CreateShaderResourceView(g_lumTex, nullptr, &g_lumSrv));
-    for (auto*& s : g_lumStaging) ok = ok && SUCCEEDED(g_device->CreateTexture2D(&sd, nullptr, &s));
-    if (!ok) {
-      Log("hud: brightness meter unavailable");
-      SafeRelease(g_lumSrv);
-      SafeRelease(g_lumTex);
-      for (auto*& s : g_lumStaging) SafeRelease(s);
-      bb->Release();
-      return;
-    }
-    g_lumTex->GetDesc(&d);
-    g_lumMips = d.MipLevels;
-  }
-  ID3D11DeviceContext* ctx = nullptr;
-  g_device->GetImmediateContext(&ctx);
-  const int slot = (g_lumCalls / 4) % kLumSlots;
-  // Read the oldest pending result (no stall: skip if the GPU isn't done yet).
-  const int read = (slot + 1) % kLumSlots;
-  if (g_lumPending[read]) {
-    D3D11_MAPPED_SUBRESOURCE m;
-    if (ctx->Map(g_lumStaging[read], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m) == S_OK) {
-      const auto* px = static_cast<const uint8_t*>(m.pData);
-      const bool bgra = bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM || bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-      const float r = (bgra ? px[2] : px[0]) / 255.0f, g = px[1] / 255.0f, b = (bgra ? px[0] : px[2]) / 255.0f;
-      g_sceneLum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-      ctx->Unmap(g_lumStaging[read], 0);
-      g_lumPending[read] = false;
-    }
-  }
-  ctx->CopySubresourceRegion(g_lumTex, 0, 0, 0, 0, bb, 0, nullptr);
-  ctx->GenerateMips(g_lumSrv);
-  ctx->CopySubresourceRegion(g_lumStaging[slot], 0, 0, 0, 0, g_lumTex, g_lumMips - 1, nullptr);
-  g_lumPending[slot] = true;
-  ctx->Release();
+  if (EnsureDeviceAndRtv(bb)) g_sceneMeter.Sample(bb);
   bb->Release();
 }
 
-float SceneBrightness() { return g_sceneLum.load(); }
+float SceneBrightness() { return g_sceneMeter.value.load(); }
+float HudCoverage() { return g_hudMeter.value.load(); }
 
 bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look) {
   if (!g_capturingAllowed || g_failed || !g_origOMSetRenderTargets || !swapChain) return false;
@@ -470,6 +503,13 @@ bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look) {
       c.hud[2] = look.halo;
       c.hud[3] = look.haloRadius;
       c.hud2[0] = look.alphaBoost;
+      const float w = float(bbDesc.Width), h = float(bbDesc.Height);
+      c.hud2[1] = std::round(look.sideShift * w);
+      c.hud2[2] = look.sideOutline ? 1.0f : 0.0f;
+      c.hud3[0] = std::round(w * (1 - look.sideWidth));
+      c.hud3[1] = 0;
+      c.hud3[2] = w;
+      c.hud3[3] = std::round(h * look.sideHeight);
       ctx->Unmap(g_cb, 0);
     }
     StateBackup backup;
@@ -494,6 +534,7 @@ bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look) {
     ctx->PSSetShaderResources(0, 1, &none);
     backup.Restore(ctx);
     ctx->Release();
+    g_hudMeter.Sample(bb);
   }
   bb->Release();
   return ok;
@@ -687,11 +728,10 @@ void Shutdown() {
   SafeRelease(g_vs);
   SafeRelease(g_ps);
   SafeRelease(g_hudPs);
-  SafeRelease(g_lumSrv);
-  SafeRelease(g_lumTex);
-  for (auto*& s : g_lumStaging) SafeRelease(s);
-  g_lumMips = 0;
-  g_sceneLum = -1.0f;
+  g_sceneMeter.Release();
+  g_hudMeter.Release();
+  g_sceneMeter.value = -1.0f;
+  g_hudMeter.value = -1.0f;
   SafeRelease(g_hudCopySrv);
   SafeRelease(g_hudCopy);
   SafeRelease(g_cb);

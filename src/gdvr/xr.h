@@ -11,7 +11,7 @@ namespace gdvr::xr {
 enum class Mode : int { Off = 0, Screen = 1, Stereo = 2 };
 
 struct Settings {
-  Mode mode = Mode::Screen;
+  Mode mode = Mode::Stereo;
   float worldScale = 15.0f;     // game units per real metre (bigger = you are a giant over a miniature)
   float fovDeg = 0.0f;          // vertical FOV for each eye; 0 = fit the headset's lenses automatically
   bool levelHorizon = true;     // map real "straight ahead" to the game's horizon, not its tilted camera
@@ -27,22 +27,28 @@ struct Settings {
   bool maskDebug = false;       // distance rings (green inside, red fading, blue black)
   int maskDepthPick = 0;        // which screen-sized depth buffer: 0 = first bound (the G-buffer pass, cleared per eye), -1 = last
   bool hud = true;              // show the game's HUD on a floating panel in stereo mode
-  float hudDistance = 0.7f;     // metres in front of the recentred position
-  float hudWidth = 0.9f;        // metres wide (the panel covers the whole game screen)
-  float hudDown = 0.125f;       // metres below eye level
-  float hudTiltDeg = 12.0f;     // tilted back so it faces up towards you
-  float hudBrightness = 1.0f;   // HUD colour multiplier
+  float hudDistance = 0.72f;    // metres in front of the recentred position
+  float hudWidth = 2.15f;       // metres wide (the panel covers the whole game screen)
+  float hudDown = 0.19f;        // metres below eye level
+  float hudTiltDeg = 32.0f;     // tilted back so it faces up towards you
+  // Minimap + quest tracker block (top-right corner of the HUD image), moved left across the panel.
+  float hudSideShift = 0.0f;    // how far left, as a fraction of the HUD width (0 = where the game draws it)
+  float hudSideWidth = 0.22f;   // the block's size as fractions of the HUD image, from the top-right corner
+  float hudSideHeight = 0.55f;
+  float hudMenuCoverage = 0.25f; // HUD coverage above this = a menu is open: the block goes back to its place
+  bool hudSideOutline = false;  // outline the block (red: where the game draws it, green: where it is shown; not saved)
+  float hudBrightness = 1.5f;   // HUD colour multiplier
   float hudOpacity = 1.0f;      // HUD overall opacity
   // Dark backing (halo) behind HUD elements, stronger and wider as the scene gets brighter, so the
   // HUD stays readable in daylight. The HUD itself keeps its brightness.
   bool hudDayAdapt = true;        // blend the halo from its night to its day values with scene brightness
-  float hudHalo = 0.4f;           // night: halo strength (0 = off)
-  float hudHaloRadius = 6.0f;     // night: halo size in pixels (HUD image is 2560 px across the panel)
-  float hudHaloDay = 0.9f;        // daylight: halo strength
+  float hudHalo = 0.83f;          // night: halo strength (0 = off)
+  float hudHaloRadius = 20.0f;    // night: halo size in pixels (HUD image is 2560 px across the panel)
+  float hudHaloDay = 1.0f;        // daylight: halo strength
   float hudHaloRadiusDay = 14.0f; // daylight: halo size in pixels
   float hudDayFrom = 0.10f;       // scene brightness that counts as night (measured ~0.08-0.14 at night)
   float hudDayTo = 0.28f;         // ... and as full daylight (measured ~0.24-0.32 in daylight)
-  float hudAlphaBoost = 3.0f;   // dark-but-drawn HUD pixels become solid (1 = brightness-only, looks additive)
+  float hudAlphaBoost = 8.0f;  // dark-but-drawn HUD pixels become solid (1 = brightness-only, looks additive)
   bool hudForceDaylight = false; // preview the daylight look at any time of day (not saved)
   bool swapEyeOrder = false;     // render the right eye first (diagnostic)
   bool keepRunningUnfocused = true;  // don't pause when the game window loses focus
@@ -82,7 +88,8 @@ void PrepareHud();
 // Releases the session and everything else (on unload).
 void Shutdown();
 
-void DrawDebugUI();
+void DrawDebugUI();      // settings: HUD placement/look, world, save
+void DrawDiagnostics();  // session details
 
 // Saves the next frame's eye images to %LOCALAPPDATA%\gdvr\eye0.bmp / eye1.bmp (also F11).
 void RequestEyeDump();

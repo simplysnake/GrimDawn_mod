@@ -21,6 +21,7 @@
 
 #include "d3dtrace.h"
 #include "input.h"
+#include "perf.h"
 #include "log.h"
 
 namespace gdvr::xr {
@@ -303,6 +304,7 @@ void PollEvents() {
 // HUD look for this frame: the dark backing behind HUD elements follows scene brightness.
 float g_hudLum = -1.0f;    // smoothed scene brightness
 float g_hudDayAmount = 0;  // 0 = night look, 1 = daylight look
+bool g_hudMenuOpen = false;  // a game menu is open (from HUD coverage)
 
 mask::HudLook CurrentHudLook() {
   const float lum = mask::SceneBrightness();
@@ -318,7 +320,8 @@ mask::HudLook CurrentHudLook() {
   static ULONGLONG lastLog = 0;
   if (GetTickCount64() - lastLog > 5000) {
     lastLog = GetTickCount64();
-    Log("hud: scene brightness %.3f -> daylight %.2f", g_hudLum, g_hudDayAmount);
+    Log("hud: scene brightness %.3f -> daylight %.2f, coverage %.3f (menu %d)", g_hudLum, g_hudDayAmount,
+        mask::HudCoverage(), int(g_hudMenuOpen));
   }
   auto mix = [](float a, float b, float t) { return a + (b - a) * t; };
   mask::HudLook look;
@@ -327,6 +330,16 @@ mask::HudLook CurrentHudLook() {
   look.halo = mix(g_settings.hudHalo, g_settings.hudHaloDay, g_hudDayAmount);
   look.haloRadius = mix(g_settings.hudHaloRadius, g_settings.hudHaloRadiusDay, g_hudDayAmount);
   look.alphaBoost = g_settings.hudAlphaBoost;
+  // A menu (inventory, options, map...) covers much of the HUD image: put the block back while it's open.
+  const float coverage = mask::HudCoverage();
+  if (coverage >= 0) {
+    if (!g_hudMenuOpen && coverage > g_settings.hudMenuCoverage) g_hudMenuOpen = true;
+    if (g_hudMenuOpen && coverage < g_settings.hudMenuCoverage * 0.85f) g_hudMenuOpen = false;  // hysteresis
+  }
+  look.sideShift = g_hudMenuOpen ? 0.0f : g_settings.hudSideShift;
+  look.sideWidth = g_settings.hudSideWidth;
+  look.sideHeight = g_settings.hudSideHeight;
+  look.sideOutline = g_settings.hudSideOutline;
   return look;
 }
 
@@ -361,6 +374,10 @@ bool SaveSettingsLocked() {
   put(L"hud_width", s.hudWidth);
   put(L"hud_down", s.hudDown);
   put(L"hud_tilt", s.hudTiltDeg);
+  put(L"hud_side_shift", s.hudSideShift);
+  put(L"hud_side_width", s.hudSideWidth);
+  put(L"hud_side_height", s.hudSideHeight);
+  put(L"hud_menu_coverage", s.hudMenuCoverage);
   put(L"hud_brightness", s.hudBrightness);
   put(L"hud_opacity", s.hudOpacity);
   put(L"hud_alpha_boost", s.hudAlphaBoost);
@@ -699,19 +716,46 @@ void Shutdown() {
 
 void DrawDebugUI() {
   std::lock_guard lock(g_mutex);
-  if (!ImGui::CollapsingHeader("VR (F9 mode, F10 recentre)", ImGuiTreeNodeFlags_DefaultOpen)) return;
   static const char* kModes[] = {"Off", "Screen", "Stereo"};
-  ImGui::Text("Mode: %s   Status: %s", kModes[int(g_settings.mode)], g_status.c_str());
-  ImGui::Text("Session state %d  running=%d  shouldRender=%d  frames submitted=%llu", int(g_state), int(g_running),
-              int(g_frameState.shouldRender), (unsigned long long)g_framesSubmitted);
-  ImGui::Text("Eyes captured: %d %d   tan(half fov) L %.3f/%.3f  R %.3f/%.3f", int(g_eyeCaptured[0]),
-              int(g_eyeCaptured[1]), g_eyeTan[0][0], g_eyeTan[0][1], g_eyeTan[1][0], g_eyeTan[1][1]);
-  ImGui::Text("Eye L rel pos %.3f %.3f %.3f", g_eyeRel[0].position.x, g_eyeRel[0].position.y, g_eyeRel[0].position.z);
-  if (ImGui::TreeNodeEx("HUD look", ImGuiTreeNodeFlags_DefaultOpen)) {
+  ImGui::Text("%s  |  %s  |  %.0f fps (%.1f ms)", kModes[int(g_settings.mode)], g_status.c_str(), perf::LastFps(),
+              perf::LastFrameMs());
+  ImGui::TextDisabled("F9 mode  F10 recentre (or both sticks)  F7 fade mask  F11 eye images");
+  ImGui::Separator();
+
+  if (ImGui::CollapsingHeader("HUD placement", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::SliderFloat("Distance (m)", &g_settings.hudDistance, 0.25f, 2.5f, "%.2f");
+    float height = -g_settings.hudDown;  // shown as up = positive
+    if (ImGui::SliderFloat("Height (m, + up)", &height, -0.8f, 0.5f, "%.2f")) g_settings.hudDown = -height;
+    ImGui::SliderFloat("Size (m wide)", &g_settings.hudWidth, 0.3f, 2.5f, "%.2f");
+    ImGui::SliderFloat("Tilt (deg)", &g_settings.hudTiltDeg, -10.0f, 60.0f, "%.0f");
+    ImGui::SeparatorText("Minimap & quests (top right)");
+    ImGui::SliderFloat("Move left", &g_settings.hudSideShift, 0.0f, 0.78f, "%.2f");
+    ImGui::SliderFloat("Block width", &g_settings.hudSideWidth, 0.05f, 0.5f, "%.2f");
+    ImGui::SliderFloat("Block height", &g_settings.hudSideHeight, 0.05f, 1.0f, "%.2f");
+    ImGui::Checkbox("Show block outline", &g_settings.hudSideOutline);
+    ImGui::Text("HUD coverage %.3f  ->  %s", mask::HudCoverage(),
+                g_hudMenuOpen ? "menu open (block in place)" : "no menu");
+    ImGui::SliderFloat("Menu open above", &g_settings.hudMenuCoverage, 0.05f, 0.8f, "%.2f");
+    if (ImGui::Button("Recentre view")) g_recenterRequested = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Reset placement")) {
+      const Settings d;
+      g_settings.hudDistance = d.hudDistance;
+      g_settings.hudDown = d.hudDown;
+      g_settings.hudWidth = d.hudWidth;
+      g_settings.hudTiltDeg = d.hudTiltDeg;
+      g_settings.hudSideShift = d.hudSideShift;
+      g_settings.hudSideWidth = d.hudSideWidth;
+      g_settings.hudSideHeight = d.hudSideHeight;
+      g_settings.hudMenuCoverage = d.hudMenuCoverage;
+    }
+  }
+
+  if (ImGui::CollapsingHeader("HUD look", ImGuiTreeNodeFlags_DefaultOpen)) {
     ImGui::Text("Scene brightness %.3f  ->  daylight %.2f", g_hudLum, g_hudDayAmount);
     ImGui::SliderFloat("Brightness", &g_settings.hudBrightness, 0.1f, 1.5f);
     ImGui::SliderFloat("Opacity", &g_settings.hudOpacity, 0.1f, 1.0f);
-    ImGui::SliderFloat("Solid dark parts (alpha boost)", &g_settings.hudAlphaBoost, 1.0f, 8.0f);
+    ImGui::SliderFloat("Solid dark parts", &g_settings.hudAlphaBoost, 1.0f, 8.0f);
     ImGui::Checkbox("Stronger backing in daylight", &g_settings.hudDayAdapt);
     ImGui::SameLine();
     ImGui::Checkbox("Preview daylight", &g_settings.hudForceDaylight);
@@ -734,18 +778,40 @@ void DrawDebugUI() {
       g_settings.hudDayFrom = d.hudDayFrom;
       g_settings.hudDayTo = d.hudDayTo;
     }
-    ImGui::TreePop();
   }
+
+  if (ImGui::CollapsingHeader("World")) {
+    ImGui::SliderFloat("World scale", &g_settings.worldScale, 4.0f, 40.0f, "%.1f");
+    ImGui::Checkbox("Fade mask", &g_settings.maskEnabled);
+    ImGui::SliderFloat("Fade starts (units)", &g_settings.maskInner, 10.0f, 80.0f, "%.0f");
+    ImGui::SliderFloat("Fully dark at (units)", &g_settings.maskOuter, 15.0f, 90.0f, "%.0f");
+  }
+
+  ImGui::Separator();
   static double savedAt = -10;
   if (ImGui::Button("Save settings")) {
     if (SaveSettingsLocked()) savedAt = ImGui::GetTime();
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Reset all to defaults")) {
+    const Mode mode = g_settings.mode;
+    g_settings = Settings{};
+    g_settings.mode = mode;
   }
   if (ImGui::GetTime() - savedAt < 3) {
     ImGui::SameLine();
     ImGui::TextUnformatted("Saved to control.ini");
   }
-  ImGui::Text("Scale %.1f  FOV %.0f  level=%d  frustum=%d", g_settings.worldScale, g_settings.fovDeg,
-              int(g_settings.levelHorizon), int(g_settings.recomputeFrustum));
+}
+
+void DrawDiagnostics() {
+  std::lock_guard lock(g_mutex);
+  ImGui::Text("Session state %d  running=%d  shouldRender=%d  frames submitted=%llu", int(g_state), int(g_running),
+              int(g_frameState.shouldRender), (unsigned long long)g_framesSubmitted);
+  ImGui::Text("Eyes captured %d %d   lens tan L %.3f/%.3f  R %.3f/%.3f", int(g_eyeCaptured[0]), int(g_eyeCaptured[1]),
+              g_eyeTan[0][0], g_eyeTan[0][1], g_eyeTan[1][0], g_eyeTan[1][1]);
+  ImGui::Text("Scale %.1f  FOV %.0f  far %.0f  level=%d", g_settings.worldScale, g_settings.fovDeg, g_settings.farPlane,
+              int(g_settings.levelHorizon));
 }
 
 }  // namespace gdvr::xr

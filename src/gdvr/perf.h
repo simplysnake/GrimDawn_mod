@@ -27,6 +27,10 @@ void AddEyeCpu(int eye, double ms);
 // writes the once-a-second summary to the log.
 void OnPresent(ID3D11Device* device, ID3D11DeviceContext* context, double xrWaitMs);
 
+// Last once-a-second summary (0 until the first second has passed).
+double LastFps();
+double LastFrameMs();
+
 int InFlight();
 void Shutdown();
 
