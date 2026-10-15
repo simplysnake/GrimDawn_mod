@@ -23,6 +23,9 @@ void OnSetRenderTargets(unsigned numViews, void* const* rtvs, void* dsv);
 void SetSkipSegment(int segment);
 int SkipSegment();
 
+// Draw calls seen so far on the game's context (all of them, recording or not).
+unsigned long long TotalDraws();
+
 int InFlight();
 
 }  // namespace gdvr::d3dtrace

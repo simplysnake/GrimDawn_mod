@@ -18,6 +18,7 @@ struct Settings {
   bool recomputeFrustum = true; // cull with the eye camera's own frustum (fixes holes when looking around)
   float screenDistance = 2.0f;  // Screen mode: metres in front of you
   float screenWidth = 3.0f;     // Screen mode: metres wide
+  float cameraPull = 6.0f;       // game units the viewpoint moves towards the character (closer zoom range)
   float farPlane = 70.0f;       // far plane for the eye cameras (game: 120); the biggest performance lever
   bool maskEnabled = true;       // fade to black around the player
   float maskInner = 45.0f;      // horizontal distance from the player where the fade starts (game units)
@@ -36,7 +37,10 @@ struct Settings {
   float hudSideWidth = 0.22f;   // the block's size as fractions of the HUD image, from the top-right corner
   float hudSideHeight = 0.55f;
   float hudMenuCoverage = 0.25f; // HUD coverage above this = a menu is open: the block goes back to its place
-  bool hudSideOutline = false;  // outline the block (red: where the game draws it, green: where it is shown; not saved)
+  bool hudSideOutline = false;
+  bool itemLabels3d = true;      // item names drawn by the mod in 3D at the item
+  bool damageNumbers3d = true;   // damage numbers drawn by the mod in 3D (true depth) instead of the flat UI
+  bool labelsInWorld = true;     // health bars, names, damage numbers drawn where you see their monster/item  // outline the block (red: where the game draws it, green: where it is shown; not saved)
   float hudBrightness = 1.5f;   // HUD colour multiplier
   float hudOpacity = 1.0f;      // HUD overall opacity
   // Dark backing (halo) behind HUD elements, stronger and wider as the scene gets brighter, so the
@@ -56,6 +60,10 @@ struct Settings {
 };
 
 Settings& GetSettings();
+
+// Where the line from the centre of your eyes to a point (recentred space, metres) crosses the HUD
+// panel, in HUD image fractions (0..1 across, 0..1 down). False if the panel is behind you or edge-on.
+bool HudPanelPoint(Vec3 pointRel, float& u, float& v);
 void RequestRecenter();
 
 // Writes the current settings to %LOCALAPPDATA%\gdvr\control.ini (section [vr]).

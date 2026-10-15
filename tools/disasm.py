@@ -16,6 +16,7 @@ ap.add_argument("dll")
 ap.add_argument("module")
 ap.add_argument("rva")
 ap.add_argument("--max", type=int, default=400)
+ap.add_argument("--image", action="store_true", help="input is a mapped in-memory image (file offset = RVA), e.g. logs/grimdawn_mem.bin")
 a = ap.parse_args()
 
 data = Path(a.dll).read_bytes()
@@ -32,6 +33,8 @@ for i in range(nsec):
 
 
 def off(rva):
+    if a.image:
+        return rva
     for va, size, rptr in sections:
         if va <= rva < va + size:
             return rva - va + rptr

@@ -18,8 +18,10 @@
 #include "engine_api.h"
 #include "d3dtrace.h"
 #include "input.h"
+#include "labels.h"
 #include "log.h"
 #include "mask.h"
+#include "numbers.h"
 #include "perf.h"
 #include "vr_math.h"
 #include "xr.h"
@@ -338,13 +340,26 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   // Base frame the head moves in. Levelled by default so looking straight ahead in real life
   // means looking at the game's horizon (look down to see your character).
   Vec3 right = Read3(saved, kSide) * -1.0f, up = Read3(saved, kUp), fwd = Read3(saved, kForward);
-  const Vec3 origin = Read3(saved, kOrigin);
+  Vec3 origin = Read3(saved, kOrigin);
+  {
+    // Bring the viewpoint closer to the character along the camera's line of sight (the whole zoom
+    // range moves in by the same amount), never closer than a little above the character.
+    const float* t = g_cameraTarget(self);
+    const Vec3 target = Read3(t, kTargetPos);
+    const Vec3 toTarget = target - origin;
+    const float dist = std::sqrt(Dot(toTarget, toTarget));
+    const bool haveTarget = t[kTargetPos] != 0 || t[kTargetPos + 1] != 0 || t[kTargetPos + 2] != 0;
+    if (s.cameraPull > 0 && haveTarget && dist > 1e-3f)
+      origin = origin + toTarget * (std::min(s.cameraPull, std::max(0.0f, dist - 4.0f)) / dist);
+  }
   if (s.levelHorizon) {
     fwd = Normalize({fwd.x, 0, fwd.z});
     up = {0, 1, 0};
     right = Cross(fwd, up);
   }
   auto toWorld = [&](Vec3 v) { return right * v.x + up * v.y + fwd * v.z; };
+  labels::SetStereoFrame(origin, right, up, fwd, s.worldScale);  // for placing labels this frame
+  numbers::OnStereoFrame();
 
   // Frustum objects are built in place by the engine (size unknown, so over-allocate).
   alignas(16) static unsigned char frustumBuf[2][4096];
@@ -436,6 +451,21 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
       mp.debug = s.maskDebug;
       xr::ApplyMask(mp);
     }
+    {
+      // 3D damage numbers, drawn into this eye's image at their world positions.
+      numbers::EyeView ev;
+      ev.origin = Read3(eyeCoords, kOrigin);
+      ev.right = toWorld(XrToCamera(Rotate(p.orientation, {1, 0, 0})));
+      ev.up = Read3(eyeCoords, kUp);
+      ev.forward = Read3(eyeCoords, kForward);
+      ev.tanX = tanX;
+      ev.tanY = tanY;
+      ev.nearPlane = g_getNear(camera);
+      ev.width = float(g_vpWidth(viewport));
+      ev.height = float(g_vpHeight(viewport));
+      labels::DrawEye(ev);
+      numbers::DrawEye(ev);
+    }
     xr::CaptureEye(eye, tanX, tanY);
     perf::Mark(pass == 0 ? perf::kEye0End : perf::kEye1End);
     snap(pass + 1);
@@ -457,6 +487,7 @@ void HookRender(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Regi
                 const gd::Viewport* viewport, const gd::Frustum* frustum, unsigned int flags,
                 bool flag2, const gd::WorldFrustum* worldFrustum) {
   InFlightGuard guard;
+  labels::WorldRenderScope worldRender;
 
   int index;
   {
@@ -616,6 +647,10 @@ void PollControlFile() {
   vr.hudSideWidth = getFloat(L"hud_side_width", vr.hudSideWidth);
   vr.hudSideHeight = getFloat(L"hud_side_height", vr.hudSideHeight);
   vr.hudMenuCoverage = getFloat(L"hud_menu_coverage", vr.hudMenuCoverage);
+  vr.labelsInWorld = getInt(L"labels_in_world", vr.labelsInWorld) != 0;
+  vr.damageNumbers3d = getInt(L"damage_numbers_3d", vr.damageNumbers3d) != 0;
+  vr.cameraPull = getFloat(L"camera_pull", vr.cameraPull);
+  vr.itemLabels3d = getInt(L"item_labels_3d", vr.itemLabels3d) != 0;
   vr.hudSideOutline = getInt(L"hud_side_outline", vr.hudSideOutline) != 0;
   vr.hudBrightness = getFloat(L"hud_brightness", vr.hudBrightness);
   vr.hudOpacity = getFloat(L"hud_opacity", vr.hudOpacity);
@@ -692,10 +727,13 @@ bool Install() {
   }
   Log("Engine hooks created (GraphicsMTRenderer::Render @ %p)", render);
   perf::InstallStageHooks(engine);
+  labels::Install(engine);
+  numbers::Install(engine);
   return true;
 }
 
 void OnFramePresented() {
+  labels::OnFramePresented();
   Frame frame;
   {
     std::lock_guard lock(g_mutex);
@@ -728,6 +766,8 @@ void DrawDebugUI() {
   xr::DrawDebugUI();
   if (ImGui::CollapsingHeader("Diagnostics")) {
     xr::DrawDiagnostics();
+    labels::DrawDebugUI();
+    numbers::DrawDebugUI();
     input::DrawDebugUI();
   }
   ImGui::End();

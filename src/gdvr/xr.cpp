@@ -361,6 +361,7 @@ bool SaveSettingsLocked() {
   put(L"level_horizon", s.levelHorizon);
   put(L"recompute_frustum", s.recomputeFrustum);
   put(L"far_plane", s.farPlane);
+  put(L"camera_pull", s.cameraPull);
   put(L"screen_distance", s.screenDistance);
   put(L"screen_width", s.screenWidth);
   put(L"mask", s.maskEnabled);
@@ -378,6 +379,9 @@ bool SaveSettingsLocked() {
   put(L"hud_side_width", s.hudSideWidth);
   put(L"hud_side_height", s.hudSideHeight);
   put(L"hud_menu_coverage", s.hudMenuCoverage);
+  put(L"labels_in_world", s.labelsInWorld);
+  put(L"damage_numbers_3d", s.damageNumbers3d);
+  put(L"item_labels_3d", s.itemLabels3d);
   put(L"hud_brightness", s.hudBrightness);
   put(L"hud_opacity", s.hudOpacity);
   put(L"hud_alpha_boost", s.hudAlphaBoost);
@@ -581,6 +585,27 @@ bool StereoFrameActive() {
          g_settings.mode == Mode::Stereo;
 }
 
+bool HudPanelPoint(Vec3 pointRel, float& u, float& v) {
+  std::lock_guard lock(g_mutex);
+  // Panel pose relative to the recentred origin (EndFrame adds the recentre yaw/position on top).
+  const float tilt = -g_settings.hudTiltDeg * 3.14159265f / 180.0f;
+  const Quat pitch{std::sin(tilt * 0.5f), 0, 0, std::cos(tilt * 0.5f)};
+  const Vec3 centre{0, -g_settings.hudDown, -g_settings.hudDistance};
+  const Vec3 axisX = Rotate(pitch, {1, 0, 0}), axisY = Rotate(pitch, {0, 1, 0}), normal = Rotate(pitch, {0, 0, 1});
+  const float width = g_settings.hudWidth;
+  const float height = width * float(g_hudChain.height) / float(std::max(1u, g_hudChain.width));
+  const Vec3 eye = (g_eyeRel[0].position + g_eyeRel[1].position) * 0.5f;
+  const Vec3 dir = pointRel - eye;
+  const float denom = Dot(normal, dir);
+  if (std::fabs(denom) < 1e-6f) return false;
+  const float t = Dot(normal, centre - eye) / denom;
+  if (t <= 0) return false;
+  const Vec3 local = eye + dir * t - centre;
+  u = Dot(local, axisX) / width + 0.5f;
+  v = 0.5f - Dot(local, axisY) / height;
+  return true;
+}
+
 Pose EyePose(int eye) {
   std::lock_guard lock(g_mutex);
   return g_eyeRel[eye & 1];
@@ -733,6 +758,10 @@ void DrawDebugUI() {
     ImGui::SliderFloat("Block width", &g_settings.hudSideWidth, 0.05f, 0.5f, "%.2f");
     ImGui::SliderFloat("Block height", &g_settings.hudSideHeight, 0.05f, 1.0f, "%.2f");
     ImGui::Checkbox("Show block outline", &g_settings.hudSideOutline);
+    ImGui::Checkbox("3D damage numbers", &g_settings.damageNumbers3d);
+    ImGui::SameLine();
+    ImGui::Checkbox("3D item names", &g_settings.itemLabels3d);
+    ImGui::Checkbox("Labels over their monsters/items (health bars, names)", &g_settings.labelsInWorld);
     ImGui::Text("HUD coverage %.3f  ->  %s", mask::HudCoverage(),
                 g_hudMenuOpen ? "menu open (block in place)" : "no menu");
     ImGui::SliderFloat("Menu open above", &g_settings.hudMenuCoverage, 0.05f, 0.8f, "%.2f");
@@ -782,6 +811,7 @@ void DrawDebugUI() {
 
   if (ImGui::CollapsingHeader("World")) {
     ImGui::SliderFloat("World scale", &g_settings.worldScale, 4.0f, 40.0f, "%.1f");
+    ImGui::SliderFloat("Camera closer (units)", &g_settings.cameraPull, 0.0f, 20.0f, "%.1f");
     ImGui::Checkbox("Fade mask", &g_settings.maskEnabled);
     ImGui::SliderFloat("Fade starts (units)", &g_settings.maskInner, 10.0f, 80.0f, "%.0f");
     ImGui::SliderFloat("Fully dark at (units)", &g_settings.maskOuter, 15.0f, 90.0f, "%.0f");

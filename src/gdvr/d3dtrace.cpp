@@ -78,7 +78,10 @@ void Record(const std::string& line) {
   g_lines[g_eye].push_back(line);
 }
 
+std::atomic<unsigned long long> g_totalDraws{0};
+
 void CountDraw() {
+  ++g_totalDraws;
   if (g_eye < 0) return;
   std::lock_guard lock(g_mutex);
   if (g_eye >= 0) ++g_draws;
@@ -296,6 +299,8 @@ void OnSetRenderTargets(unsigned numViews, void* const* rtvs, void* dsv) {
 }
 
 int InFlight() { return g_inFlight.load(); }
+
+unsigned long long TotalDraws() { return g_totalDraws.load(); }
 
 void SetSkipSegment(int segment) { g_skipSegment = segment; }
 int SkipSegment() { return g_skipSegment.load(); }

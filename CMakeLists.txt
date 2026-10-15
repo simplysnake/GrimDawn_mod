@@ -57,12 +57,16 @@ add_library(gdvr SHARED
   src/gdvr/engine_hooks.cpp
   src/gdvr/overlay.cpp
   src/gdvr/input.cpp
+  src/gdvr/labels.cpp
   src/gdvr/log.cpp
   src/gdvr/mask.cpp
+  src/gdvr/numbers.cpp
   src/gdvr/perf.cpp
   src/gdvr/xr.cpp)
 target_link_libraries(gdvr PRIVATE minhook imgui openxr_loader d3d11 dxgi d3dcompiler)
 target_compile_definitions(gdvr PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+# Development builds also log into the repo (logs/), readable from tools that can't see %LOCALAPPDATA%.
+target_compile_definitions(gdvr PRIVATE GDVR_DEV_LOG_DIR=L"${CMAKE_SOURCE_DIR}/logs")
 
 set(GDVR_GAME_DIR "G:/Games/Steam/steamapps/common/Grim Dawn" CACHE PATH "Grim Dawn install folder")
 
