@@ -3,6 +3,7 @@
 #include <Xinput.h>
 
 #include <MinHook.h>
+#include <intrin.h>
 #include <imgui.h>
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <vector>
 
 #include "log.h"
+#include "pointer.h"
 #include "xr.h"
 
 namespace gdvr::input {
@@ -33,6 +35,7 @@ enum ActionId {
   kStart, kBack,
   kDpadUp, kDpadDown, kDpadLeft, kDpadRight,
   kRecenter,
+  kAimPose,
   kActionCount
 };
 
@@ -62,6 +65,7 @@ const ActionDef kActions[kActionCount] = {
     {"dpad_left", "D-pad left", XR_ACTION_TYPE_BOOLEAN_INPUT},
     {"dpad_right", "D-pad right", XR_ACTION_TYPE_BOOLEAN_INPUT},
     {"recenter", "Recenter view", XR_ACTION_TYPE_BOOLEAN_INPUT},
+    {"aim", "Pointer (laser aim)", XR_ACTION_TYPE_POSE_INPUT},
 };
 
 struct Binding {
@@ -86,6 +90,8 @@ const Binding kIndexBindings[] = {
     {kRStickClick, "/user/hand/right/input/thumbstick/click"},
     {kStart, "/user/hand/right/input/trackpad/force"},
     {kBack, "/user/hand/left/input/trackpad/force"},
+    {kAimPose, "/user/hand/left/input/aim/pose"},
+    {kAimPose, "/user/hand/right/input/aim/pose"},
 };
 
 const Binding kTouchBindings[] = {
@@ -102,6 +108,8 @@ const Binding kTouchBindings[] = {
     {kLStickClick, "/user/hand/left/input/thumbstick/click"},
     {kRStickClick, "/user/hand/right/input/thumbstick/click"},
     {kStart, "/user/hand/left/input/menu/click"},
+    {kAimPose, "/user/hand/left/input/aim/pose"},
+    {kAimPose, "/user/hand/right/input/aim/pose"},
 };
 
 const Binding kViveBindings[] = {
@@ -115,13 +123,33 @@ const Binding kViveBindings[] = {
     {kRT, "/user/hand/right/input/trigger/value"},
     {kStart, "/user/hand/right/input/menu/click"},
     {kBack, "/user/hand/left/input/menu/click"},
+    {kAimPose, "/user/hand/left/input/aim/pose"},
+    {kAimPose, "/user/hand/right/input/aim/pose"},
 };
 
+const Binding kWmrBindings[] = {
+    {kMove, "/user/hand/left/input/thumbstick"},
+    {kRightStick, "/user/hand/right/input/thumbstick"},
+    {kA, "/user/hand/right/input/trackpad/click"},
+    {kX, "/user/hand/left/input/trackpad/click"},
+    {kLB, "/user/hand/left/input/squeeze/click"},
+    {kRB, "/user/hand/right/input/squeeze/click"},
+    {kLT, "/user/hand/left/input/trigger/value"},
+    {kRT, "/user/hand/right/input/trigger/value"},
+    {kLStickClick, "/user/hand/left/input/thumbstick/click"},
+    {kRStickClick, "/user/hand/right/input/thumbstick/click"},
+    {kStart, "/user/hand/right/input/menu/click"},
+    {kBack, "/user/hand/left/input/menu/click"},
+    {kAimPose, "/user/hand/left/input/aim/pose"},
+    {kAimPose, "/user/hand/right/input/aim/pose"},
+};
 const Binding kSimpleBindings[] = {
     {kA, "/user/hand/right/input/select/click"},
     {kX, "/user/hand/left/input/select/click"},
     {kStart, "/user/hand/right/input/menu/click"},
     {kBack, "/user/hand/left/input/menu/click"},
+    {kAimPose, "/user/hand/left/input/aim/pose"},
+    {kAimPose, "/user/hand/right/input/aim/pose"},
 };
 
 struct Profile {
@@ -134,11 +162,16 @@ const Profile kProfiles[] = {
     {"/interaction_profiles/valve/index_controller", kIndexBindings, std::size(kIndexBindings)},
     {"/interaction_profiles/oculus/touch_controller", kTouchBindings, std::size(kTouchBindings)},
     {"/interaction_profiles/htc/vive_controller", kViveBindings, std::size(kViveBindings)},
+    {"/interaction_profiles/microsoft/motion_controller", kWmrBindings, std::size(kWmrBindings)},
     {"/interaction_profiles/khr/simple_controller", kSimpleBindings, std::size(kSimpleBindings)},
 };
 
 XrActionSet g_actionSet = XR_NULL_HANDLE;
 XrAction g_actions[kActionCount] = {};
+XINPUT_GAMEPAD g_vrControls = {};  // VR controls as a pad (under g_padMutex)
+bool g_pointerMode = false;
+XrPath g_handPaths[2] = {};
+XrSpace g_aimSpaces[2] = {};  // controller aim pose (pointer ray) per hand
 std::string g_profiles = "none";
 
 // ---- Virtual gamepad ---------------------------------------------------------------------
@@ -280,7 +313,97 @@ XrPath ToPath(XrInstance instance, const char* s) {
   return p;
 }
 
+// ---- Keyboard guard -----------------------------------------------------------------------------
+// The game's DirectInput.dll installs a system-wide low-level keyboard hook (WH_KEYBOARD_LL, to
+// block the Windows key). Windows sends every key press on the PC through that hook first, so
+// whenever the game hangs or sits in its crash reporter the whole keyboard stops working until
+// the process is gone. The mod refuses that hook (and removes it if it is already installed).
+using SetWindowsHookExAFn = HHOOK(WINAPI*)(int, HOOKPROC, HINSTANCE, DWORD);
+using UnhookWindowsHookExFn = BOOL(WINAPI*)(HHOOK);
+SetWindowsHookExAFn g_origSetHook = nullptr;
+UnhookWindowsHookExFn g_origUnhook = nullptr;
+HMODULE g_gameInput = nullptr;
+const HHOOK kRefusedHook = reinterpret_cast<HHOOK>(static_cast<uintptr_t>(0x6764767221));  // never a real handle
+
+bool CalledFrom(void* returnAddress, HMODULE module) {
+  HMODULE mod = nullptr;
+  return module &&
+         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCWSTR>(returnAddress), &mod) &&
+         mod == module;
+}
+
+HHOOK WINAPI HookSetWindowsHookExA(int id, HOOKPROC proc, HINSTANCE instance, DWORD thread) {
+  if (id == WH_KEYBOARD_LL && CalledFrom(_ReturnAddress(), g_gameInput)) {
+    Log("input: refused the game's low-level keyboard hook (it freezes the PC keyboard when the game hangs)");
+    return kRefusedHook;
+  }
+  return g_origSetHook(id, proc, instance, thread);
+}
+
+BOOL WINAPI HookUnhookWindowsHookEx(HHOOK hook) {
+  if (hook == kRefusedHook) return TRUE;
+  return g_origUnhook(hook);
+}
+
+// The game's controller on-screen keyboard (Grim Dawn.exe+0x104E10 / +0x106B78) types by pressing
+// real keys system-wide with SendInput. With VR controllers it ends up sending keys such as the
+// Windows key (Index A/B opened the Start menu, took focus away and could leave the key stuck).
+// While VR is running the mod's controls reach the game directly, so the game's SendInput is dropped.
+using SendInputFn = UINT(WINAPI*)(UINT, LPINPUT, int);
+SendInputFn g_origSendInput = nullptr;
+std::atomic<int> g_sendInputLogs{0};
+
+UINT WINAPI HookSendInput(UINT count, LPINPUT inputs, int size) {
+  ++g_inFlight;
+  UINT result;
+  if (CalledFrom(_ReturnAddress(), GetModuleHandleW(nullptr)) && pointer::Live()) {
+    if (g_sendInputLogs < 50) {
+      ++g_sendInputLogs;
+      for (UINT i = 0; i < count && inputs && size == int(sizeof(INPUT)); ++i)
+        if (inputs[i].type == INPUT_KEYBOARD)
+          Log("input: blocked the game's SendInput key: vk 0x%02X scan 0x%02X flags 0x%lX", inputs[i].ki.wVk,
+              inputs[i].ki.wScan, inputs[i].ki.dwFlags);
+        else
+          Log("input: blocked the game's SendInput (type %lu)", inputs[i].type);
+    }
+    result = count;  // as if sent
+  } else {
+    result = g_origSendInput(count, inputs, size);
+  }
+  --g_inFlight;
+  return result;
+}
+
 }  // namespace
+
+bool InstallKeyboardGuard() {
+  g_gameInput = GetModuleHandleW(L"DirectInput.dll");
+  if (!g_gameInput) return false;
+  // Already installed (the game started before the mod): remove it now.
+  auto* installed = reinterpret_cast<HHOOK*>(
+      GetProcAddress(g_gameInput, "?keyboardHook@DirectInputDevice@GAME@@0PEAUHHOOK__@@EA"));
+  if (installed && *installed && *installed != kRefusedHook) {
+    const BOOL removed = UnhookWindowsHookEx(*installed);
+    Log("input: removed the game's low-level keyboard hook (%s)", removed ? "ok" : "failed");
+    if (removed) *installed = kRefusedHook;  // the game's own later unhook then goes to the stand-in
+  }
+  HMODULE user32 = GetModuleHandleW(L"user32.dll");
+  void* set = reinterpret_cast<void*>(GetProcAddress(user32, "SetWindowsHookExA"));
+  void* unhook = reinterpret_cast<void*>(GetProcAddress(user32, "UnhookWindowsHookEx"));
+  const bool ok =
+      set && unhook &&
+      MH_CreateHook(set, reinterpret_cast<void*>(&HookSetWindowsHookExA), reinterpret_cast<void**>(&g_origSetHook)) ==
+          MH_OK &&
+      MH_CreateHook(unhook, reinterpret_cast<void*>(&HookUnhookWindowsHookEx),
+                    reinterpret_cast<void**>(&g_origUnhook)) == MH_OK;
+  if (void* sendInput = reinterpret_cast<void*>(GetProcAddress(user32, "SendInput")))
+    if (MH_CreateHook(sendInput, reinterpret_cast<void*>(&HookSendInput), reinterpret_cast<void**>(&g_origSendInput)) !=
+        MH_OK)
+      Log("input: could not hook SendInput");
+  Log(ok ? "input: keyboard guard on" : "input: keyboard guard could not be installed");
+  return ok;
+}
 
 bool InstallXInputHook() {
   // The game's DirectInput.dll imports XInputGetState by ordinal (#2) from xinput1_3.dll.
@@ -310,6 +433,12 @@ bool CreateActions(XrInstance instance, XrSession session) {
     strcpy_s(ai.actionName, kActions[i].name);
     strcpy_s(ai.localizedActionName, kActions[i].localized);
     ai.actionType = kActions[i].type;
+    if (ai.actionType == XR_ACTION_TYPE_POSE_INPUT) {  // one pose per hand
+      g_handPaths[0] = ToPath(instance, "/user/hand/left");
+      g_handPaths[1] = ToPath(instance, "/user/hand/right");
+      ai.countSubactionPaths = 2;
+      ai.subactionPaths = g_handPaths;
+    }
     if (!Check(instance, xrCreateAction(g_actionSet, &ai, &g_actions[i]), kActions[i].name)) return false;
   }
 
@@ -328,6 +457,13 @@ bool CreateActions(XrInstance instance, XrSession session) {
   attach.countActionSets = 1;
   attach.actionSets = &g_actionSet;
   if (!Check(instance, xrAttachSessionActionSets(session, &attach), "xrAttachSessionActionSets")) return false;
+  for (int hand = 0; hand < 2; ++hand) {
+    XrActionSpaceCreateInfo asi{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    asi.action = g_actions[kAimPose];
+    asi.subactionPath = g_handPaths[hand];
+    asi.poseInActionSpace.orientation.w = 1;
+    Check(instance, xrCreateActionSpace(session, &asi, &g_aimSpaces[hand]), "xrCreateActionSpace(aim)");
+  }
   Log("input: %d actions attached", int(kActionCount));
   return true;
 }
@@ -381,12 +517,13 @@ bool Sync(XrSession session, bool focused) {
           {kA, XINPUT_GAMEPAD_A}, {kB, XINPUT_GAMEPAD_B}, {kX, XINPUT_GAMEPAD_X}, {kY, XINPUT_GAMEPAD_Y},
           {kLB, XINPUT_GAMEPAD_LEFT_SHOULDER}, {kRB, XINPUT_GAMEPAD_RIGHT_SHOULDER},
           {kLStickClick, XINPUT_GAMEPAD_LEFT_THUMB}, {kRStickClick, XINPUT_GAMEPAD_RIGHT_THUMB},
-          {kStart, XINPUT_GAMEPAD_START}, {kBack, XINPUT_GAMEPAD_BACK},
           {kDpadUp, XINPUT_GAMEPAD_DPAD_UP}, {kDpadDown, XINPUT_GAMEPAD_DPAD_DOWN},
           {kDpadLeft, XINPUT_GAMEPAD_DPAD_LEFT}, {kDpadRight, XINPUT_GAMEPAD_DPAD_RIGHT},
       };
       for (const auto& b : buttons)
         if (getBool(b.id)) pad.wButtons |= b.bit;
+      if (getBool(kStart)) pad.wButtons |= XINPUT_GAMEPAD_START;
+      if (getBool(kBack)) pad.wButtons |= XINPUT_GAMEPAD_BACK;
 
       const bool r = getBool(kRecenter);
       recenter = r && !g_lastRecenter;
@@ -395,13 +532,42 @@ bool Sync(XrSession session, bool focused) {
   }
 
   std::lock_guard lock(g_padMutex);
+  // Pointer mode: the VR controls drive the game as mouse and keyboard (pointer module), so the
+  // virtual gamepad stays silent and the game leaves its gamepad mode. Without stereo frames (main
+  // menu, loading) there is no pointer, so the gamepad takes over again.
+  g_vrControls = pad;
+  g_pointerMode = anyActive && xr::GetSettings().pointer && !xr::GetSettings().pureController && pointer::Live();
+  if (g_pointerMode) {
+    pad = {};
+    anyActive = false;
+  }
   if (std::memcmp(&pad, &g_pad, sizeof(pad)) != 0) ++g_padPacket;
   g_pad = pad;
   g_padActive = anyActive;
   return recenter;
 }
 
+bool PointerControls(XINPUT_GAMEPAD& controls) {
+  std::lock_guard lock(g_padMutex);
+  controls = g_vrControls;
+  return g_pointerMode;
+}
+
+bool LocateAim(int hand, XrSpace base, XrTime time, XrPosef& pose) {
+  if (!g_aimSpaces[hand & 1] || !base) return false;
+  XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+  if (XR_FAILED(xrLocateSpace(g_aimSpaces[hand & 1], base, time, &loc))) return false;
+  const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+  if ((loc.locationFlags & need) != need) return false;
+  pose = loc.pose;
+  return true;
+}
+
 void DestroyActions() {
+  for (XrSpace& sp : g_aimSpaces) {
+    if (sp) xrDestroySpace(sp);
+    sp = XR_NULL_HANDLE;
+  }
   if (g_actionSet) xrDestroyActionSet(g_actionSet);  // also destroys its actions
   g_actionSet = XR_NULL_HANDLE;
   std::memset(g_actions, 0, sizeof(g_actions));

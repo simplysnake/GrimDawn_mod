@@ -125,6 +125,12 @@ void StartSteamVR() {
 bool StartGame(const fs::path& gameDir) {
   const fs::path exe = gameDir / L"x64" / L"Grim Dawn.exe";
   std::wstring cmd = L"\"" + exe.wstring() + L"\"";
+  // Tell the game it already runs as Grim Dawn inside Steam (the way Steam itself starts games), so it
+  // doesn't relaunch itself through Steam. A relaunch makes Steam start Grim Dawn as a second, desktop
+  // game, which SteamVR then shows on its Theater Screen with desktop controller bindings (Index B
+  // turned into the Windows key).
+  SetEnvironmentVariableW(L"SteamAppId", kAppId);
+  SetEnvironmentVariableW(L"SteamGameId", kAppId);
   STARTUPINFOW si = {sizeof(si)};
   PROCESS_INFORMATION pi = {};
   if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, gameDir.c_str(), &si, &pi)) {

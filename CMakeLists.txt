@@ -62,8 +62,9 @@ add_library(gdvr SHARED
   src/gdvr/mask.cpp
   src/gdvr/numbers.cpp
   src/gdvr/perf.cpp
+  src/gdvr/pointer.cpp
   src/gdvr/xr.cpp)
-target_link_libraries(gdvr PRIVATE minhook imgui openxr_loader d3d11 dxgi d3dcompiler)
+target_link_libraries(gdvr PRIVATE minhook imgui openxr_loader d3d11 dxgi d3dcompiler dinput8 dxguid)
 target_compile_definitions(gdvr PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 # Development builds also log into the repo (logs/), readable from tools that can't see %LOCALAPPDATA%.
 target_compile_definitions(gdvr PRIVATE GDVR_DEV_LOG_DIR=L"${CMAKE_SOURCE_DIR}/logs")
@@ -84,8 +85,12 @@ file(WRITE ${CMAKE_BINARY_DIR}/generated/gdvr_config.h.in "#pragma once\n#define
 configure_file(${CMAKE_BINARY_DIR}/generated/gdvr_config.h.in ${CMAKE_BINARY_DIR}/generated/gdvr_config.h @ONLY)
 target_include_directories(gdvr_launch PRIVATE ${CMAKE_BINARY_DIR}/generated)
 
+# Diagnostic: logs every key press on the PC and where it came from (listen-only Raw Input)
+add_executable(gdvr_keywatch src/keywatch/main.cpp)
+target_compile_definitions(gdvr_keywatch PRIVATE UNICODE _UNICODE)
+
 # Put all outputs next to each other so the injector/launcher find the DLL
-set_target_properties(gdvr gdvr_inject gdvr_launch PROPERTIES
+set_target_properties(gdvr gdvr_inject gdvr_launch gdvr_keywatch PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin
   RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/bin
   RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/bin

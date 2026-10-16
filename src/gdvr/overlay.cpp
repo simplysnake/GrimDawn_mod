@@ -178,8 +178,8 @@ HRESULT STDMETHODCALLTYPE HookResizeBuffers(IDXGISwapChain* swapChain, UINT coun
 
 }  // namespace
 
-void DrawWorldText(const WorldText* items, int count) {
-  if (!g_imguiReady || g_tornDown || count <= 0 || !g_context) return;
+void DrawWorld(const WorldText* texts, int textCount, const Polyline* lines, int lineCount) {
+  if (!g_imguiReady || g_tornDown || (textCount <= 0 && lineCount <= 0) || !g_context) return;
   if (!g_rtv) {
     if (!g_swapChain) return;
     CreateRtv(g_swapChain);
@@ -192,10 +192,17 @@ void DrawWorldText(const WorldText* items, int count) {
   if (!g_worldList) g_worldList = IM_NEW(ImDrawList)(ImGui::GetDrawListSharedData());
   ImDrawList* list = g_worldList;
   list->_ResetForNewFrame();
+  list->Flags = ImDrawListFlags_AntiAliasedLines | ImDrawListFlags_AntiAliasedFill;
   list->PushTextureID(io.Fonts->TexID);
   list->PushClipRect(ImVec2(0, 0), ImVec2(float(g_bbWidth), float(g_bbHeight)));
-  for (int i = 0; i < count; ++i) {
-    const WorldText& t = items[i];
+  for (int i = 0; i < lineCount; ++i) {
+    const Polyline& l = lines[i];
+    if (l.points < 2) continue;
+    list->AddPolyline(reinterpret_cast<const ImVec2*>(l.xy), l.points, l.color,
+                      l.closed ? ImDrawFlags_Closed : ImDrawFlags_None, l.thickness);
+  }
+  for (int i = 0; i < textCount; ++i) {
+    const WorldText& t = texts[i];
     const ImVec2 sz = font->CalcTextSizeA(t.size, FLT_MAX, 0, t.text);
     const ImVec2 pos(t.x - sz.x * 0.5f, t.y - sz.y * 0.5f);
     const unsigned alpha = t.color >> 24;
@@ -229,6 +236,10 @@ void DrawWorldText(const WorldText* items, int count) {
   if (oldRtv) oldRtv->Release();
   if (oldDsv) oldDsv->Release();
 }
+
+HWND GameWindow() { return g_window; }
+
+void DrawWorldText(const WorldText* items, int count) { DrawWorld(items, count, nullptr, 0); }
 
 bool Install() {
   // A throwaway device + swapchain on a hidden window, just to read the vtable.

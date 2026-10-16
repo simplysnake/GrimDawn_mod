@@ -55,6 +55,10 @@ float SceneBrightness();
 // Average coverage of the finished HUD image (0..1), or -1 before the first reading. Menus raise it.
 float HudCoverage();
 
+// HUD opacity around an image position (fractions 0..1) from a 160x90 map read back every few
+// frames; -1 if not measured yet.
+float HudAlphaAt(float u, float v);
+
 // ---- Per-eye depth history ---------------------------------------------------------------
 // The engine's geometry pass samples a copy of the PREVIOUS render's depth (soft blending of
 // grass/rocks/characters into the ground); the copy is refreshed only after the geometry pass.

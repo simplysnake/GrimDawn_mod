@@ -38,6 +38,9 @@ struct Settings {
   float hudSideHeight = 0.55f;
   float hudMenuCoverage = 0.25f; // HUD coverage above this = a menu is open: the block goes back to its place
   bool hudSideOutline = false;
+  bool pointer = true;           // controller laser pointer
+  int pointerHand = 1;           // 0 left, 1 right
+  bool pureController = false;   // VR controllers as a gamepad (game's gamepad mode, no laser)
   bool itemLabels3d = true;      // item names drawn by the mod in 3D at the item
   bool damageNumbers3d = true;   // damage numbers drawn by the mod in 3D (true depth) instead of the flat UI
   bool labelsInWorld = true;     // health bars, names, damage numbers drawn where you see their monster/item  // outline the block (red: where the game draws it, green: where it is shown; not saved)
@@ -64,6 +67,19 @@ Settings& GetSettings();
 // Where the line from the centre of your eyes to a point (recentred space, metres) crosses the HUD
 // panel, in HUD image fractions (0..1 across, 0..1 down). False if the panel is behind you or edge-on.
 bool HudPanelPoint(Vec3 pointRel, float& u, float& v);
+
+// Controller aim pose (hand 0 left, 1 right) relative to the recentred origin; false if not tracked.
+bool HandAim(int hand, Pose& pose);
+
+// Where a ray (recentred space, unit direction) hits the HUD panel: image fractions and distance (m).
+bool HudPanelRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distance);
+
+// Whether the HUD shows something at this image position that should catch the pointer (`sticky`:
+// the pointer is already on the HUD, so fainter parts count too). The whole panel while a menu is open.
+bool HudSolidAt(float u, float v, bool sticky = false);
+
+// A game menu (inventory, skills, options...) is open, judged from HUD coverage.
+bool HudMenuOpen();
 void RequestRecenter();
 
 // Writes the current settings to %LOCALAPPDATA%\gdvr\control.ini (section [vr]).

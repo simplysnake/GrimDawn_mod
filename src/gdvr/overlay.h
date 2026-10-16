@@ -1,5 +1,7 @@
 #pragma once
 
+#include <windows.h>
+
 namespace gdvr::overlay {
 
 // Finds IDXGISwapChain::Present/ResizeBuffers via a throwaway device and creates the hooks.
@@ -23,6 +25,19 @@ struct WorldText {
   bool box = false;   // dark box behind the text (item labels); otherwise an outline (numbers)
 };
 void DrawWorldText(const WorldText* items, int count);
+
+// Lines in back-buffer pixels (the pointer laser and cursor ring), drawn like WorldText.
+struct Polyline {
+  const float* xy;    // x0, y0, x1, y1, ...
+  int points;
+  unsigned color;     // ImGui colour (ABGR)
+  float thickness;    // pixels
+  bool closed;
+};
+void DrawWorld(const WorldText* texts, int textCount, const Polyline* lines, int lineCount);
+
+// The game's window (null until the first frame).
+HWND GameWindow();
 
 // Number of threads currently inside one of our swapchain detours.
 int InFlight();

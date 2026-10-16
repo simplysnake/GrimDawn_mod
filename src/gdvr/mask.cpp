@@ -8,6 +8,8 @@
 #include <MinHook.h>
 
 #include <atomic>
+#include <mutex>
+#include <vector>
 #include <cstring>
 
 #include "d3dtrace.h"
@@ -378,8 +380,17 @@ struct Meter {
   bool pending[kSlots] = {};
   int calls = 0;
   std::atomic<float> value{-1.0f};
+  // Optional: read back a whole small mip level too (the HUD's alpha map for the pointer).
+  int gridLevel = -1;
+  ID3D11Texture2D* gridStaging = nullptr;
+  bool gridPending = false;
+  UINT gridW = 0, gridH = 0;
+  std::mutex gridMutex;
+  std::vector<uint8_t> grid;  // alpha per grid cell, under gridMutex
 
   void Release() {
+    SafeRelease(gridStaging);
+    gridPending = false;
     SafeRelease(srv);
     SafeRelease(tex);
     for (auto*& st : staging) SafeRelease(st);
@@ -439,6 +450,39 @@ struct Meter {
     ctx->GenerateMips(srv);
     ctx->CopySubresourceRegion(staging[slot], 0, 0, 0, 0, tex, mips - 1, nullptr);
     pending[slot] = true;
+    if (gridLevel >= 0 && UINT(gridLevel) < mips) {
+      if (!gridStaging) {
+        D3D11_TEXTURE2D_DESC gd = bbDesc;
+        gd.Width = std::max(1u, bbDesc.Width >> gridLevel);
+        gd.Height = std::max(1u, bbDesc.Height >> gridLevel);
+        gd.MipLevels = 1;
+        gd.Usage = D3D11_USAGE_STAGING;
+        gd.BindFlags = 0;
+        gd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        gd.MiscFlags = 0;
+        if (SUCCEEDED(g_device->CreateTexture2D(&gd, nullptr, &gridStaging))) {
+          gridW = gd.Width;
+          gridH = gd.Height;
+        }
+      }
+      if (gridStaging && gridPending) {
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (ctx->Map(gridStaging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped) == S_OK) {
+          std::lock_guard lock(gridMutex);
+          grid.resize(size_t(gridW) * gridH);
+          for (UINT y = 0; y < gridH; ++y) {
+            const auto* row = static_cast<const uint8_t*>(mapped.pData) + size_t(y) * mapped.RowPitch;
+            for (UINT x = 0; x < gridW; ++x) grid[size_t(y) * gridW + x] = row[x * 4 + 3];
+          }
+          ctx->Unmap(gridStaging, 0);
+          gridPending = false;
+        }
+      }
+      if (gridStaging && !gridPending) {
+        ctx->CopySubresourceRegion(gridStaging, 0, 0, 0, 0, tex, gridLevel, nullptr);
+        gridPending = true;
+      }
+    }
     ctx->Release();
   }
 };
@@ -462,6 +506,14 @@ void MeasureBrightness(IDXGISwapChain* swapChain) {
 
 float SceneBrightness() { return g_sceneMeter.value.load(); }
 float HudCoverage() { return g_hudMeter.value.load(); }
+
+float HudAlphaAt(float u, float v) {
+  std::lock_guard lock(g_hudMeter.gridMutex);
+  if (g_hudMeter.grid.empty() || u < 0 || u > 1 || v < 0 || v > 1) return -1.0f;
+  const UINT x = std::min(g_hudMeter.gridW - 1, UINT(u * g_hudMeter.gridW));
+  const UINT y = std::min(g_hudMeter.gridH - 1, UINT(v * g_hudMeter.gridH));
+  return g_hudMeter.grid[size_t(y) * g_hudMeter.gridW + x] / 255.0f;
+}
 
 bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look) {
   if (!g_capturingAllowed || g_failed || !g_origOMSetRenderTargets || !swapChain) return false;
@@ -534,6 +586,7 @@ bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look) {
     ctx->PSSetShaderResources(0, 1, &none);
     backup.Restore(ctx);
     ctx->Release();
+    g_hudMeter.gridLevel = 4;  // 2560x1440 -> 160x90 cells for the pointer's HUD hit test
     g_hudMeter.Sample(bb);
   }
   bb->Release();

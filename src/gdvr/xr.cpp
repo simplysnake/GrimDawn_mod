@@ -70,6 +70,8 @@ bool g_viewsValid = false;
 bool g_haveRef = false;
 Pose g_ref;               // recentred origin (yaw only + head position), in LOCAL space
 Pose g_eyeRel[2];         // eye poses relative to g_ref
+Pose g_handRel[2];        // controller aim poses relative to g_ref
+bool g_handValid[2] = {};
 bool g_eyeCaptured[2] = {};
 float g_eyeTan[2][2] = {};
 uint64_t g_framesSubmitted = 0;
@@ -382,6 +384,9 @@ bool SaveSettingsLocked() {
   put(L"labels_in_world", s.labelsInWorld);
   put(L"damage_numbers_3d", s.damageNumbers3d);
   put(L"item_labels_3d", s.itemLabels3d);
+  put(L"pointer", s.pointer);
+  put(L"pointer_hand", s.pointerHand);
+  put(L"pure_controller", s.pureController);
   put(L"hud_brightness", s.hudBrightness);
   put(L"hud_opacity", s.hudOpacity);
   put(L"hud_alpha_boost", s.hudAlphaBoost);
@@ -503,6 +508,11 @@ void BeginFrame() {
                  (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT);
   if (g_viewsValid && g_haveRef)
     for (int i = 0; i < 2; ++i) g_eyeRel[i] = Relative(g_ref, ToPose(g_views[i].pose));
+  for (int hand = 0; hand < 2; ++hand) {
+    XrPosef aim;
+    g_handValid[hand] = g_haveRef && input::LocateAim(hand, g_localSpace, g_frameState.predictedDisplayTime, aim);
+    if (g_handValid[hand]) g_handRel[hand] = Relative(g_ref, ToPose(aim));
+  }
 
   // Controllers -> virtual gamepad (read by the game through XInputGetState).
   if (input::Sync(g_session, g_state == XR_SESSION_STATE_FOCUSED)) g_recenterRequested = true;
@@ -604,6 +614,50 @@ bool HudPanelPoint(Vec3 pointRel, float& u, float& v) {
   u = Dot(local, axisX) / width + 0.5f;
   v = 0.5f - Dot(local, axisY) / height;
   return true;
+}
+
+bool HandAim(int hand, Pose& pose) {
+  std::lock_guard lock(g_mutex);
+  if (!g_handValid[hand & 1]) return false;
+  pose = g_handRel[hand & 1];
+  return true;
+}
+
+bool HudPanelRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distance) {
+  std::lock_guard lock(g_mutex);
+  if (!g_settings.hud) return false;
+  const float tilt = -g_settings.hudTiltDeg * 3.14159265f / 180.0f;
+  const Quat pitch{std::sin(tilt * 0.5f), 0, 0, std::cos(tilt * 0.5f)};
+  const Vec3 centre{0, -g_settings.hudDown, -g_settings.hudDistance};
+  const Vec3 axisX = Rotate(pitch, {1, 0, 0}), axisY = Rotate(pitch, {0, 1, 0}), normal = Rotate(pitch, {0, 0, 1});
+  const float width = g_settings.hudWidth;
+  const float height = width * float(g_hudChain.height) / float(std::max(1u, g_hudChain.width));
+  const float denom = Dot(normal, dirRel);
+  if (std::fabs(denom) < 1e-6f) return false;
+  const float t = Dot(normal, centre - originRel) / denom;
+  if (t <= 0) return false;
+  const Vec3 local = originRel + dirRel * t - centre;
+  u = Dot(local, axisX) / width + 0.5f;
+  v = 0.5f - Dot(local, axisY) / height;
+  distance = t;
+  return u >= 0 && u <= 1 && v >= 0 && v <= 1;
+}
+
+bool HudSolidAt(float u, float v, bool sticky) {
+  std::lock_guard lock(g_mutex);
+  // A menu is open: the whole panel catches the pointer (no falling through gaps in a menu).
+  if (g_hudMenuOpen) return true;
+  // The minimap & quest block never catches the pointer.
+  const float left = 1.0f - g_settings.hudSideWidth - g_settings.hudSideShift;
+  if (u >= left && u <= left + g_settings.hudSideWidth && v <= g_settings.hudSideHeight) return false;
+  // Already on the HUD: stay on it over faint parts too, so the pointer doesn't flicker through.
+  const float a = mask::HudAlphaAt(u, v);
+  return a < 0 || a > (sticky ? 0.08f : 0.3f);  // not measured yet: treat the panel as solid
+}
+
+bool HudMenuOpen() {
+  std::lock_guard lock(g_mutex);
+  return g_hudMenuOpen;
 }
 
 Pose EyePose(int eye) {
@@ -807,6 +861,15 @@ void DrawDebugUI() {
       g_settings.hudDayFrom = d.hudDayFrom;
       g_settings.hudDayTo = d.hudDayTo;
     }
+  }
+
+  if (ImGui::CollapsingHeader("Pointer", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::Checkbox("Pure controller (gamepad mode, no laser)", &g_settings.pureController);
+    ImGui::Checkbox("Controller laser", &g_settings.pointer);
+    ImGui::SameLine();
+    ImGui::RadioButton("Left hand", &g_settings.pointerHand, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("Right hand", &g_settings.pointerHand, 1);
   }
 
   if (ImGui::CollapsingHeader("World")) {

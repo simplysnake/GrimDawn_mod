@@ -24,17 +24,21 @@ with the devotion constellations as the sky.
 
 ## Next (suggested order)
 
-### 1. Mouse in VR: world cursor – medium (1–2 weeks)
-- Hide the game cursor; keep a cursor in the 3D world, clamped to the masked area around the player.
-- Mouse deltas move it relative to the view; draw it as a 3D marker in both eyes.
-- Each frame, project it through the game's own camera (`Camera::Project` / `GetImagePoint`) and feed that
-  screen position to the game, so hover, highlight and click-to-move work unchanged.
-- Over the HUD panel, switch to 2D panel coordinates (inventory, skills, menus).
+### 1. Pointer in VR: world cursor + controller laser – medium (1–2 weeks)
+One pipeline: a point in the 3D world becomes the game's mouse position. Sources feed it the point:
+- **Controller laser** (primary): a ray from the VR controller; trigger = click (move / attack / pick up),
+  skills cast at the pointed spot. Works alongside stick movement (gamepad mode).
+- **Mouse**: deltas move the point relative to the view, clamped to the masked area around the player.
+- Each frame, project the point through the game's own camera and feed that screen position to the game,
+  so hover, highlight, picking and click-to-move work unchanged; hide the game's flat cursor.
+- Draw the laser and a 3D cursor marker in both eyes (same per-eye drawing as the 3D labels).
+- Over the HUD panel: the laser hit becomes a panel position, i.e. a mouse position on the game's screen
+  (inventory, stash, skills, menus become point-and-click).
+- Check how the game mixes gamepad and mouse control (it switches on the last input device).
 
 ### 2. Gaze cursor – small once 1 exists (~1 day)
-- Cursor defaults to where the head points on the ground; mouse movement lets it drift off;
-  after a short idle time it glides back to the gaze point.
-- Same pipeline for a controller laser pointer.
+- A third pointer source: where the head points on the ground; after a short idle time the cursor glides
+  back to the gaze point.
 
 ### 3. Comfort – medium
 - Stabilised world: smooth camera follow instead of locked to the character (motion-sickness risk).

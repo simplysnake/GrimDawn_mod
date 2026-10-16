@@ -23,6 +23,7 @@
 #include "mask.h"
 #include "numbers.h"
 #include "perf.h"
+#include "pointer.h"
 #include "vr_math.h"
 #include "xr.h"
 
@@ -335,6 +336,14 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   const float savedFov = g_getFov(camera);
   const float savedAspect = g_getAspect(camera);
   const float savedFar = g_getFar(camera);
+  pointer::GameView gameView;  // the game's own camera: where the pointer becomes a mouse position
+  ReadTanFov(camera, viewport, gameView.tanX, gameView.tanY);
+  gameView.origin = Read3(saved, kOrigin);
+  gameView.right = Read3(saved, kSide) * -1.0f;
+  gameView.up = Read3(saved, kUp);
+  gameView.forward = Read3(saved, kForward);
+  gameView.width = float(g_vpWidth(viewport));
+  gameView.height = float(g_vpHeight(viewport));
   if (s.farPlane > 0) g_setFar(cam, s.farPlane);
 
   // Base frame the head moves in. Levelled by default so looking straight ahead in real life
@@ -360,6 +369,11 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   auto toWorld = [&](Vec3 v) { return right * v.x + up * v.y + fwd * v.z; };
   labels::SetStereoFrame(origin, right, up, fwd, s.worldScale);  // for placing labels this frame
   numbers::OnStereoFrame();
+  {
+    const float* t = g_cameraTarget(self);
+    const bool haveTarget = t[kTargetPos] != 0 || t[kTargetPos + 1] != 0 || t[kTargetPos + 2] != 0;
+    pointer::Update(origin, right, up, fwd, s.worldScale, Read3(t, kTargetPos), haveTarget, gameView);
+  }
 
   // Frustum objects are built in place by the engine (size unknown, so over-allocate).
   alignas(16) static unsigned char frustumBuf[2][4096];
@@ -465,6 +479,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
       ev.height = float(g_vpHeight(viewport));
       labels::DrawEye(ev);
       numbers::DrawEye(ev);
+      pointer::DrawEye(ev);
     }
     xr::CaptureEye(eye, tanX, tanY);
     perf::Mark(pass == 0 ? perf::kEye0End : perf::kEye1End);
@@ -651,6 +666,9 @@ void PollControlFile() {
   vr.damageNumbers3d = getInt(L"damage_numbers_3d", vr.damageNumbers3d) != 0;
   vr.cameraPull = getFloat(L"camera_pull", vr.cameraPull);
   vr.itemLabels3d = getInt(L"item_labels_3d", vr.itemLabels3d) != 0;
+  vr.pointer = getInt(L"pointer", vr.pointer) != 0;
+  vr.pointerHand = getInt(L"pointer_hand", vr.pointerHand) != 0 ? 1 : 0;
+  vr.pureController = getInt(L"pure_controller", vr.pureController) != 0;
   vr.hudSideOutline = getInt(L"hud_side_outline", vr.hudSideOutline) != 0;
   vr.hudBrightness = getFloat(L"hud_brightness", vr.hudBrightness);
   vr.hudOpacity = getFloat(L"hud_opacity", vr.hudOpacity);
@@ -768,6 +786,7 @@ void DrawDebugUI() {
     xr::DrawDiagnostics();
     labels::DrawDebugUI();
     numbers::DrawDebugUI();
+    pointer::DrawDebugUI();
     input::DrawDebugUI();
   }
   ImGui::End();
