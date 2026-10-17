@@ -32,7 +32,9 @@ struct Settings {
   char skySkip[256] = "";        // UI texture kinds left out of the capture ("WxH fN, ..."), from the UI trace             // "created by artalva.com" on the HUD panel when VR starts
   bool sky = true;
   int skySource = 0;               // constellations: 0 = the devotion map from the game files (dome), 1 = screen capture (band)
-  float skyDomeHorizonDeg = -5.0f; // the map's rim sits at this elevation (its centre straight overhead)
+  float skyDomeHorizonDeg = -5.0f;
+  float skyIncomplete = 0.45f;    // brightness of constellations you haven't completed
+  float skyGlow = 0.5f;           // glow of completed constellations and allocated stars // the map's rim sits at this elevation (its centre straight overhead)
   float skyBandWidthDeg = 150.0f;  // how wide the constellation band is around you
   float skyBandLowDeg = 2.0f;      // band from this elevation...
   float skyBandHighDeg = 55.0f;    // ...to this one

@@ -369,6 +369,8 @@ bool SaveSettingsLocked() {
   put(L"sky", s.sky);
   put(L"sky_source", s.skySource);
   put(L"sky_dome_horizon", s.skyDomeHorizonDeg);
+  put(L"sky_incomplete", s.skyIncomplete);
+  put(L"sky_glow", s.skyGlow);
   put(L"credit", s.credit);
   put(L"sky_auto_open", s.skyAutoOpen);
   {
@@ -928,8 +930,11 @@ void DrawDebugUI() {
     ImGui::RadioButton("Devotion map from the game files (dome)", &g_settings.skySource, 0);
     ImGui::SameLine();
     ImGui::RadioButton("Screen capture (band)", &g_settings.skySource, 1);
-    if (g_settings.skySource == 0)
+    if (g_settings.skySource == 0) {
       ImGui::SliderFloat("Dome rim elevation (deg)", &g_settings.skyDomeHorizonDeg, -45.0f, 30.0f, "%.0f");
+      ImGui::SliderFloat("Not completed: brightness", &g_settings.skyIncomplete, 0.0f, 1.0f, "%.2f");
+      ImGui::SliderFloat("Completed: glow", &g_settings.skyGlow, 0.0f, 1.5f, "%.2f");
+    }
     sky::DrawDebugUI();
     ImGui::SliderFloat("Turn (deg)", &g_settings.skyBandYawDeg, -180.0f, 180.0f, "%.0f");
     if (g_settings.skySource == 1) {  // screen capture only

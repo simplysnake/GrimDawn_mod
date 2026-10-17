@@ -17,6 +17,9 @@ void Start();
 // composes the map the first time the loaded data is ready.
 void* MapSrv(IDXGISwapChain* swapChain);
 
+// Brightness of constellations not yet completed (0..1) and glow strength of completed ones.
+void SetLook(float incompleteBrightness, float glow);
+
 std::string Status();
 void Shutdown();
 

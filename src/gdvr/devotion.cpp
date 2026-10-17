@@ -261,18 +261,25 @@ class Database {
 struct Image {
   std::vector<uint8_t> tex;  // the .tex file (12-byte header + DDS)
 };
+enum class Kind { Nebula, Art, Star };
 struct Sprite {
   std::string image;  // archive name
   int x = 0, y = 0;   // top-left on the devotion map
   float alpha = 1;
   int group = -1;     // constellation (its art and stars turn together), -1 = none
   float rotX = 0, rotY = 0, angle = 0;  // turned by `angle` (radians) around (rotX, rotY)
+  Kind kind = Kind::Nebula;
+  int star = -1;      // stars: index into MapData::skills
 };
 struct MapData {
   std::vector<Sprite> sprites;  // in drawing order: nebulas, constellation art, stars
   std::unordered_map<std::string, Image> images;
   float cx = 0, cy = 0, radius = 1;  // the circle (map units) holding everything, turned sprites included
   int constellations = 0;
+  std::vector<std::string> skills;   // each star's skill record (allocated = the player has it)
+  std::vector<int> skillGroup;       // ...and its constellation
+  std::unordered_map<std::string, int> skillIndex;  // skill record -> index
+  std::string glow;                  // star glow image ("" if missing)
 };
 
 // Corner k (0 TL, 1 TR, 2 BR, 3 BL) of a sprite of size w x h, turned around its rotation centre.
@@ -371,6 +378,7 @@ void Load() {
   }
   const std::string star = "skills/devotion/devotion_star_up.tex";
   const bool haveStar = image(star);
+  if (image("skills/devotion/devotion_starglow01.tex")) data->glow = "skills/devotion/devotion_starglow01.tex";
   for (int i = 1; i < 300; ++i) {
     const std::string field = "devotionConstellation" + std::to_string(i);
     if (!master.Has(field)) continue;
@@ -379,13 +387,19 @@ void Load() {
     const std::string bgRec = c.Str("constellationBackground");
     if (bgRec.empty() || !db.Get(bgRec, bg) || !image(bg.Str("bitmapName"))) continue;  // art not installed
     const int group = data->constellations;
-    art.push_back({key(bg.Str("bitmapName")), bg.Int("bitmapPositionX"), bg.Int("bitmapPositionY"), 1.0f, group});
+    art.push_back({key(bg.Str("bitmapName")), bg.Int("bitmapPositionX"), bg.Int("bitmapPositionY"), 1.0f, group,
+                   0, 0, 0, Kind::Art});
     ++data->constellations;
     for (int s = 1; s < 40 && haveStar; ++s) {
       Fields b;
       const std::string button = c.Str("devotionButton" + std::to_string(s));
-      if (!button.empty() && db.Get(button, b))
-        stars.push_back({star, b.Int("bitmapPositionX"), b.Int("bitmapPositionY"), 1.0f, group});
+      if (!button.empty() && db.Get(button, b)) {
+        stars.push_back({star, b.Int("bitmapPositionX"), b.Int("bitmapPositionY"), 1.0f, group, 0, 0, 0, Kind::Star,
+                         int(data->skills.size())});
+        data->skillIndex[Lower(b.Str("skillName"))] = int(data->skills.size());
+        data->skills.push_back(Lower(b.Str("skillName")));
+        data->skillGroup.push_back(group);
+      }
     }
   }
   for (auto* list : {&nebulas, &art, &stars})
@@ -510,30 +524,145 @@ ID3D11ShaderResourceView* MakeImage(ID3D11Device* device, const std::vector<uint
   return srv;
 }
 
-bool Compose(ID3D11Device* device, const MapData& data) {
-  ID3D11DeviceContext* ctx = nullptr;
-  device->GetImmediateContext(&ctx);
+// ---- Which stars the player has (asked from the running game) --------------------------------------
+// gGameEngine -> GameEngine::GetMainPlayer -> Character::GetSkillManager -> SkillManager::FindSkillId
+// (0 when the player doesn't have that skill). Devotion stars are skills once allocated.
+// Every devotion star exists as a skill object; an allocated one has a level above 0.
+struct GameApi {
+  void** engine = nullptr;  // &gGameEngine
+  void* (*getMainPlayer)(void* engine) = nullptr;
+  void* (*getSkillManager)(void* character) = nullptr;
+  void* (*getSkillList)(void* skills) = nullptr;           // const mem::vector<Skill*>& (begin, end)
+  const char* (*getObjectName)(void* object) = nullptr;    // the skill's record
+  uint32_t (*getSkillLevel)(void* skill) = nullptr;
+  uint32_t (*pointsSpent)(void* skills) = nullptr;
+  bool ok = false;
+};
+GameApi g_api;
+
+void ResolveGameApi() {
+  HMODULE game = GetModuleHandleW(L"Game.dll");
+  if (!game) return;
+  g_api.engine = reinterpret_cast<void**>(GetProcAddress(game, "?gGameEngine@GAME@@3PEAVGameEngine@1@EA"));
+  g_api.getMainPlayer = reinterpret_cast<void* (*)(void*)>(
+      GetProcAddress(game, "?GetMainPlayer@GameEngine@GAME@@QEBAPEAVPlayer@2@XZ"));
+  g_api.getSkillManager = reinterpret_cast<void* (*)(void*)>(
+      GetProcAddress(game, "?GetSkillManager@Character@GAME@@QEAAAEAVSkillManager@2@XZ"));
+  g_api.getSkillList = reinterpret_cast<void* (*)(void*)>(
+      GetProcAddress(game, "?GetSkillList@SkillManager@GAME@@QEBAAEBV?$vector@PEAVSkill@GAME@@@mem@@XZ"));
+  g_api.getSkillLevel = reinterpret_cast<uint32_t (*)(void*)>(GetProcAddress(game, "?GetSkillLevel@Skill@GAME@@QEBA?BIXZ"));
+  g_api.pointsSpent = reinterpret_cast<uint32_t (*)(void*)>(
+      GetProcAddress(game, "?GetNumDevotionPointsSpent@SkillManager@GAME@@QEBAIXZ"));
+  if (HMODULE engine = GetModuleHandleW(L"Engine.dll"))
+    g_api.getObjectName = reinterpret_cast<const char* (*)(void*)>(
+        GetProcAddress(engine, "?GetObjectName@Object@GAME@@QEBAPEBDXZ"));
+  g_api.ok = g_api.engine && g_api.getMainPlayer && g_api.getSkillManager && g_api.getSkillList &&
+             g_api.getSkillLevel && g_api.getObjectName && g_api.pointsSpent;
+  Log("devotion: game skill queries %s", g_api.ok ? "found" : "NOT found (completed constellations won't glow)");
+}
+
+// The player's skills with a level above 0 (record names copied out), straight from the game.
+struct RawSkill {
+  char name[160];
+};
+constexpr int kMaxSkills = 1024;
+RawSkill g_rawSkills[kMaxSkills];
+
+// Returns how many allocated skills were copied to g_rawSkills, or -1 if there is no player (menus) or
+// anything faults. Plain data only (it runs under SEH).
+int QueryAllocated(uint32_t& spent) {
+  __try {
+    void* engine = *g_api.engine;
+    if (!engine) return -1;
+    void* player = g_api.getMainPlayer(engine);
+    if (!player) return -1;
+    void* manager = g_api.getSkillManager(player);
+    if (!manager) return -1;
+    spent = g_api.pointsSpent(manager);
+    void** list = static_cast<void**>(g_api.getSkillList(manager));  // begin, end
+    void** begin = static_cast<void**>(list[0]);
+    void** end = static_cast<void**>(list[1]);
+    int n = 0;
+    for (void** it = begin; it < end && n < kMaxSkills; ++it) {
+      if (!*it || g_api.getSkillLevel(*it) == 0) continue;
+      const char* name = g_api.getObjectName(*it);
+      if (!name) continue;
+      strncpy_s(g_rawSkills[n].name, name, _TRUNCATE);
+      ++n;
+    }
+    return n;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return -1;
+  }
+}
+
+// Fills have[i] (1 = the player has allocated star i). False if there is no player (menus).
+bool QueryStars(const std::unordered_map<std::string, int>& starIndex, std::vector<uint8_t>& have, uint32_t& spent) {
+  const int n = QueryAllocated(spent);
+  if (n < 0) return false;
+  for (int k = 0; k < n; ++k) {
+    auto it = starIndex.find(Lower(g_rawSkills[k].name));
+    if (it != starIndex.end()) have[it->second] = 1;
+  }
+  return true;
+}
+
+// ---- Drawing the map on the GPU --------------------------------------------------------------------
+struct Look {
+  bool known = false;            // the player's stars are known (in game, not in menus)
+  std::vector<uint8_t> have;     // per star
+  float incomplete = 0.45f;      // brightness of constellations not completed
+  float glow = 0.5f;             // glow strength of completed ones / allocated stars
+};
+
+std::unique_ptr<MapData> g_map;  // kept after loading, for redrawing when the player's progress changes
+std::unordered_map<std::string, ID3D11ShaderResourceView*> g_images;
+ID3D11VertexShader* g_vs = nullptr;
+ID3D11PixelShader* g_ps = nullptr;
+ID3D11Buffer* g_cb = nullptr;
+ID3D11BlendState* g_blendAlpha = nullptr;
+ID3D11BlendState* g_blendAdd = nullptr;
+ID3D11SamplerState* g_samp = nullptr;
+ID3D11RasterizerState* g_raster = nullptr;
+ID3D11DepthStencilState* g_depth = nullptr;
+ID3D11RenderTargetView* g_rtv = nullptr;
+UINT g_size = 0;
+Look g_drawn;                    // what the map currently shows
+bool g_dirty = true;
+int g_complete = 0, g_allocated = 0;
+uint32_t g_spent = 0;
+
+void ReleaseGpu() {
+  for (auto& [name, srv] : g_images) SafeRelease(srv);
+  g_images.clear();
+  SafeRelease(g_rtv);
+  SafeRelease(g_depth);
+  SafeRelease(g_raster);
+  SafeRelease(g_samp);
+  SafeRelease(g_blendAdd);
+  SafeRelease(g_blendAlpha);
+  SafeRelease(g_cb);
+  SafeRelease(g_ps);
+  SafeRelease(g_vs);
+  SafeRelease(g_mapSrv);
+  SafeRelease(g_mapTex);
+}
+
+bool CreateGpu(ID3D11Device* device, const MapData& data) {
   ID3DBlob *vsb = nullptr, *psb = nullptr, *err = nullptr;
-  ID3D11VertexShader* vs = nullptr;
-  ID3D11PixelShader* ps = nullptr;
-  ID3D11Buffer* cb = nullptr;
-  ID3D11BlendState* blend = nullptr;
-  ID3D11SamplerState* samp = nullptr;
-  ID3D11RasterizerState* raster = nullptr;
-  ID3D11DepthStencilState* depth = nullptr;
-  ID3D11RenderTargetView* rtv = nullptr;
   bool ok = SUCCEEDED(D3DCompile(kSpriteShader, sizeof(kSpriteShader) - 1, "devotion", nullptr, nullptr, "VS", "vs_5_0", 0, 0, &vsb, &err)) &&
             SUCCEEDED(D3DCompile(kSpriteShader, sizeof(kSpriteShader) - 1, "devotion", nullptr, nullptr, "PS", "ps_5_0", 0, 0, &psb, &err)) &&
-            SUCCEEDED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &vs)) &&
-            SUCCEEDED(device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &ps));
+            SUCCEEDED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &g_vs)) &&
+            SUCCEEDED(device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &g_ps));
+  if (!ok) Log("devotion: shader compile failed: %s", err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+  SafeRelease(err);
+  SafeRelease(psb);
+  SafeRelease(vsb);
   // A square canvas around the circle that holds the whole map, up to 4096 px.
-  const float side = data.radius * 2;
-  const UINT size = UINT(std::min(4096.0f, side));
-  const float scale = float(size) / side;
-  const float originX = data.cx - data.radius, originY = data.cy - data.radius;
+  g_size = UINT(std::min(4096.0f, data.radius * 2));
   if (ok) {
     D3D11_TEXTURE2D_DESC d{};
-    d.Width = d.Height = size;
+    d.Width = d.Height = g_size;
     d.MipLevels = 0;
     d.ArraySize = 1;
     d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -541,9 +670,11 @@ bool Compose(ID3D11Device* device, const MapData& data) {
     d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
     d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
     D3D11_BUFFER_DESC bd{48, D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE};
-    D3D11_BLEND_DESC b{};
-    b.RenderTarget[0] = {TRUE, D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_OP_ADD, D3D11_BLEND_ONE,
-                         D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL};
+    D3D11_BLEND_DESC alpha{}, add{};
+    alpha.RenderTarget[0] = {TRUE, D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_OP_ADD, D3D11_BLEND_ONE,
+                             D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL};
+    add.RenderTarget[0] = {TRUE, D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BLEND_ONE,
+                           D3D11_BLEND_ONE, D3D11_BLEND_OP_MAX, D3D11_COLOR_WRITE_ENABLE_ALL};
     D3D11_SAMPLER_DESC sd{};
     sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -555,129 +686,158 @@ bool Compose(ID3D11Device* device, const MapData& data) {
     dd.DepthFunc = D3D11_COMPARISON_ALWAYS;
     ok = SUCCEEDED(device->CreateTexture2D(&d, nullptr, &g_mapTex)) &&
          SUCCEEDED(device->CreateShaderResourceView(g_mapTex, nullptr, &g_mapSrv)) &&
-         SUCCEEDED(device->CreateRenderTargetView(g_mapTex, nullptr, &rtv)) &&
-         SUCCEEDED(device->CreateBuffer(&bd, nullptr, &cb)) && SUCCEEDED(device->CreateBlendState(&b, &blend)) &&
-         SUCCEEDED(device->CreateSamplerState(&sd, &samp)) && SUCCEEDED(device->CreateRasterizerState(&rd, &raster)) &&
-         SUCCEEDED(device->CreateDepthStencilState(&dd, &depth));
+         SUCCEEDED(device->CreateRenderTargetView(g_mapTex, nullptr, &g_rtv)) &&
+         SUCCEEDED(device->CreateBuffer(&bd, nullptr, &g_cb)) && SUCCEEDED(device->CreateBlendState(&alpha, &g_blendAlpha)) &&
+         SUCCEEDED(device->CreateBlendState(&add, &g_blendAdd)) && SUCCEEDED(device->CreateSamplerState(&sd, &g_samp)) &&
+         SUCCEEDED(device->CreateRasterizerState(&rd, &g_raster)) && SUCCEEDED(device->CreateDepthStencilState(&dd, &g_depth));
   }
-  int drawn = 0;
-  if (ok) {
-    // Save what this changes, so the game's (cached) pipeline state is untouched afterwards.
-    ID3D11RenderTargetView* oldRtv = nullptr;
-    ID3D11DepthStencilView* oldDsv = nullptr;
-    ctx->OMGetRenderTargets(1, &oldRtv, &oldDsv);
-    UINT nvp = 1;
-    D3D11_VIEWPORT oldVp{};
-    ctx->RSGetViewports(&nvp, &oldVp);
-    ID3D11BlendState* oldBlend = nullptr;
-    float oldFactor[4];
-    UINT oldMask;
-    ctx->OMGetBlendState(&oldBlend, oldFactor, &oldMask);
-    ID3D11DepthStencilState* oldDepth = nullptr;
-    UINT oldRef;
-    ctx->OMGetDepthStencilState(&oldDepth, &oldRef);
-    ID3D11RasterizerState* oldRaster = nullptr;
-    ctx->RSGetState(&oldRaster);
-    ID3D11VertexShader* oldVs = nullptr;
-    ID3D11PixelShader* oldPs = nullptr;
-    ctx->VSGetShader(&oldVs, nullptr, nullptr);
-    ctx->PSGetShader(&oldPs, nullptr, nullptr);
-    ID3D11Buffer *oldVsCb = nullptr, *oldPsCb = nullptr;
-    ctx->VSGetConstantBuffers(0, 1, &oldVsCb);
-    ctx->PSGetConstantBuffers(0, 1, &oldPsCb);
-    ID3D11ShaderResourceView* oldSrv = nullptr;
-    ctx->PSGetShaderResources(0, 1, &oldSrv);
-    ID3D11SamplerState* oldSamp = nullptr;
-    ctx->PSGetSamplers(0, 1, &oldSamp);
-    D3D11_PRIMITIVE_TOPOLOGY oldTopo;
-    ctx->IAGetPrimitiveTopology(&oldTopo);
-    ID3D11InputLayout* oldLayout = nullptr;
-    ctx->IAGetInputLayout(&oldLayout);
-
-    const float clear[4] = {0, 0, 0, 0};
-    ctx->ClearRenderTargetView(rtv, clear);
-    D3D11_VIEWPORT vp{0, 0, float(size), float(size), 0, 1};
-    ctx->RSSetViewports(1, &vp);
-    ctx->OMSetRenderTargets(1, &rtv, nullptr);
-    const float factor[4] = {};
-    ctx->OMSetBlendState(blend, factor, 0xFFFFFFFF);
-    ctx->OMSetDepthStencilState(depth, 0);
-    ctx->RSSetState(raster);
-    ctx->VSSetShader(vs, nullptr, 0);
-    ctx->PSSetShader(ps, nullptr, 0);
-    ctx->GSSetShader(nullptr, nullptr, 0);
-    ctx->VSSetConstantBuffers(0, 1, &cb);
-    ctx->PSSetConstantBuffers(0, 1, &cb);
-    ctx->PSSetSamplers(0, 1, &samp);
-    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->IASetInputLayout(nullptr);
-    std::unordered_map<std::string, ID3D11ShaderResourceView*> srvs;
-    for (const Sprite& s : data.sprites) {
-      auto it = data.images.find(s.image);
-      if (it == data.images.end()) continue;
-      int w, h;
-      if (!TexSize(it->second.tex, w, h)) continue;
-      ID3D11ShaderResourceView*& srv = srvs[s.image];
-      if (!srv) srv = MakeImage(device, it->second.tex);
-      if (!srv) continue;
-      float c[12];
-      for (int k = 0; k < 4; ++k) {
-        float x, y;
-        Corner(s, w, h, k, x, y);
-        c[k * 2] = (x - originX) * scale / size * 2 - 1;
-        c[k * 2 + 1] = 1 - (y - originY) * scale / size * 2;
-      }
-      c[8] = c[9] = c[10] = 1;
-      c[11] = s.alpha;
-      D3D11_MAPPED_SUBRESOURCE m;
-      if (FAILED(ctx->Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) continue;
-      std::memcpy(m.pData, c, sizeof(c));
-      ctx->Unmap(cb, 0);
-      ctx->PSSetShaderResources(0, 1, &srv);
-      ctx->Draw(6, 0);
-      ++drawn;
-    }
-    ID3D11ShaderResourceView* none = nullptr;
-    ctx->PSSetShaderResources(0, 1, &none);
-    ctx->OMSetRenderTargets(1, &oldRtv, oldDsv);
-    ctx->GenerateMips(g_mapSrv);
-    for (auto& [name, srv] : srvs) SafeRelease(srv);
-
-    ctx->RSSetViewports(nvp, &oldVp);
-    ctx->OMSetBlendState(oldBlend, oldFactor, oldMask);
-    ctx->OMSetDepthStencilState(oldDepth, oldRef);
-    ctx->RSSetState(oldRaster);
-    ctx->VSSetShader(oldVs, nullptr, 0);
-    ctx->PSSetShader(oldPs, nullptr, 0);
-    ctx->VSSetConstantBuffers(0, 1, &oldVsCb);
-    ctx->PSSetConstantBuffers(0, 1, &oldPsCb);
-    ctx->PSSetShaderResources(0, 1, &oldSrv);
-    ctx->PSSetSamplers(0, 1, &oldSamp);
-    ctx->IASetPrimitiveTopology(oldTopo);
-    ctx->IASetInputLayout(oldLayout);
-    for (IUnknown* u : std::initializer_list<IUnknown*>{oldRtv, oldDsv, oldBlend, oldDepth, oldRaster, oldVs, oldPs,
-                                                        oldVsCb, oldPsCb, oldSrv, oldSamp, oldLayout})
-      if (u) u->Release();
-  } else {
-    Log("devotion: could not create the map resources%s%s", err ? ": " : "",
-        err ? static_cast<const char*>(err->GetBufferPointer()) : "");
-    SafeRelease(g_mapSrv);
-    SafeRelease(g_mapTex);
-  }
-  SafeRelease(rtv);
-  SafeRelease(depth);
-  SafeRelease(raster);
-  SafeRelease(samp);
-  SafeRelease(blend);
-  SafeRelease(cb);
-  SafeRelease(ps);
-  SafeRelease(vs);
-  SafeRelease(err);
-  SafeRelease(psb);
-  SafeRelease(vsb);
-  ctx->Release();
-  if (ok) Log("devotion: map drawn (%d sprites) into %ux%u", drawn, size, size);
+  if (ok)  // the images, once (kept for redrawing)
+    for (auto& [name, img] : data.images)
+      if (ID3D11ShaderResourceView* srv = MakeImage(device, img.tex)) g_images[name] = srv;
+  if (!ok) ReleaseGpu();
   return ok;
+}
+
+// Draws the whole map for this look (what the player has completed).
+void Redraw(ID3D11Device* device, const MapData& data, const Look& look) {
+  ID3D11DeviceContext* ctx = nullptr;
+  device->GetImmediateContext(&ctx);
+  // Save what this changes, so the game's (cached) pipeline state is untouched afterwards.
+  ID3D11RenderTargetView* oldRtv = nullptr;
+  ID3D11DepthStencilView* oldDsv = nullptr;
+  ctx->OMGetRenderTargets(1, &oldRtv, &oldDsv);
+  UINT nvp = 1;
+  D3D11_VIEWPORT oldVp{};
+  ctx->RSGetViewports(&nvp, &oldVp);
+  ID3D11BlendState* oldBlend = nullptr;
+  float oldFactor[4];
+  UINT oldMask;
+  ctx->OMGetBlendState(&oldBlend, oldFactor, &oldMask);
+  ID3D11DepthStencilState* oldDepth = nullptr;
+  UINT oldRef;
+  ctx->OMGetDepthStencilState(&oldDepth, &oldRef);
+  ID3D11RasterizerState* oldRaster = nullptr;
+  ctx->RSGetState(&oldRaster);
+  ID3D11VertexShader* oldVs = nullptr;
+  ID3D11PixelShader* oldPs = nullptr;
+  ID3D11GeometryShader* oldGs = nullptr;
+  ctx->VSGetShader(&oldVs, nullptr, nullptr);
+  ctx->PSGetShader(&oldPs, nullptr, nullptr);
+  ctx->GSGetShader(&oldGs, nullptr, nullptr);
+  ID3D11Buffer *oldVsCb = nullptr, *oldPsCb = nullptr;
+  ctx->VSGetConstantBuffers(0, 1, &oldVsCb);
+  ctx->PSGetConstantBuffers(0, 1, &oldPsCb);
+  ID3D11ShaderResourceView* oldSrv = nullptr;
+  ctx->PSGetShaderResources(0, 1, &oldSrv);
+  ID3D11SamplerState* oldSamp = nullptr;
+  ctx->PSGetSamplers(0, 1, &oldSamp);
+  D3D11_PRIMITIVE_TOPOLOGY oldTopo;
+  ctx->IAGetPrimitiveTopology(&oldTopo);
+  ID3D11InputLayout* oldLayout = nullptr;
+  ctx->IAGetInputLayout(&oldLayout);
+
+  const float clear[4] = {0, 0, 0, 0};
+  ctx->ClearRenderTargetView(g_rtv, clear);
+  D3D11_VIEWPORT vp{0, 0, float(g_size), float(g_size), 0, 1};
+  ctx->RSSetViewports(1, &vp);
+  ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
+  const float factor[4] = {};
+  ctx->OMSetDepthStencilState(g_depth, 0);
+  ctx->RSSetState(g_raster);
+  ctx->VSSetShader(g_vs, nullptr, 0);
+  ctx->PSSetShader(g_ps, nullptr, 0);
+  ctx->GSSetShader(nullptr, nullptr, 0);
+  ctx->VSSetConstantBuffers(0, 1, &g_cb);
+  ctx->PSSetConstantBuffers(0, 1, &g_cb);
+  ctx->PSSetSamplers(0, 1, &g_samp);
+  ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  ctx->IASetInputLayout(nullptr);
+
+  // Which constellations are complete (every star allocated).
+  std::vector<int> starsIn(data.constellations, 0), starsHave(data.constellations, 0);
+  for (size_t i = 0; i < data.skills.size(); ++i) {
+    ++starsIn[data.skillGroup[i]];
+    if (look.known && look.have[i]) ++starsHave[data.skillGroup[i]];
+  }
+  auto complete = [&](int g) { return look.known && g >= 0 && starsIn[g] > 0 && starsHave[g] == starsIn[g]; };
+
+  const float side = data.radius * 2, scale = float(g_size) / side;
+  const float originX = data.cx - data.radius, originY = data.cy - data.radius;
+  // One quad: `s`'s place (centre and size of its own image) grown by `grow`, drawn with `image`, tinted.
+  auto draw = [&](const Sprite& s, const std::string& image, float grow, float r, float g, float b, float a) {
+    auto it = g_images.find(image);
+    auto own = data.images.find(s.image);
+    if (it == g_images.end() || own == data.images.end()) return;
+    int w, h;
+    if (!TexSize(own->second.tex, w, h)) return;
+    Sprite q = s;
+    const float cx = s.x + w * 0.5f, cy = s.y + h * 0.5f;
+    const float gw = w * grow, gh = h * grow;
+    q.x = int(cx - gw * 0.5f);
+    q.y = int(cy - gh * 0.5f);
+    float c[12];
+    for (int k = 0; k < 4; ++k) {
+      float x, y;
+      Corner(q, int(gw), int(gh), k, x, y);
+      c[k * 2] = (x - originX) * scale / g_size * 2 - 1;
+      c[k * 2 + 1] = 1 - (y - originY) * scale / g_size * 2;
+    }
+    c[8] = r, c[9] = g, c[10] = b, c[11] = a;
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
+    std::memcpy(m.pData, c, sizeof(c));
+    ctx->Unmap(g_cb, 0);
+    ctx->PSSetShaderResources(0, 1, &it->second);
+    ctx->Draw(6, 0);
+  };
+
+  // 1. Nebulas, constellation art and stars (incomplete constellations dimmer once the player is known).
+  ctx->OMSetBlendState(g_blendAlpha, factor, 0xFFFFFFFF);
+  for (const Sprite& s : data.sprites) {
+    float a = s.alpha;
+    if (s.kind != Kind::Nebula && look.known && !complete(s.group)) a *= look.incomplete;
+    if (s.kind == Kind::Star && look.known && s.star >= 0 && look.have[s.star]) a = 1.0f;  // allocated stars bright
+    draw(s, s.image, 1.0f, 1, 1, 1, a);
+  }
+  // 2. Glow: completed constellations bloom, allocated stars get the game's star glow.
+  ctx->OMSetBlendState(g_blendAdd, factor, 0xFFFFFFFF);
+  if (look.known && look.glow > 0) {
+    for (const Sprite& s : data.sprites) {
+      if (s.kind == Kind::Art && complete(s.group)) {
+        draw(s, s.image, 1.04f, 0.75f, 0.85f, 1.0f, look.glow * 0.6f);
+        draw(s, s.image, 1.10f, 0.6f, 0.75f, 1.0f, look.glow * 0.3f);
+      } else if (s.kind == Kind::Star && s.star >= 0 && look.have[s.star] && !data.glow.empty()) {
+        draw(s, data.glow, 1.0f, 0.8f, 0.9f, 1.0f, look.glow);  // the glow image fitted to the star
+      }
+    }
+  }
+
+  ID3D11ShaderResourceView* none = nullptr;
+  ctx->PSSetShaderResources(0, 1, &none);
+  ctx->OMSetRenderTargets(1, &oldRtv, oldDsv);
+  ctx->GenerateMips(g_mapSrv);
+  ctx->RSSetViewports(nvp, &oldVp);
+  ctx->OMSetBlendState(oldBlend, oldFactor, oldMask);
+  ctx->OMSetDepthStencilState(oldDepth, oldRef);
+  ctx->RSSetState(oldRaster);
+  ctx->VSSetShader(oldVs, nullptr, 0);
+  ctx->PSSetShader(oldPs, nullptr, 0);
+  ctx->GSSetShader(oldGs, nullptr, 0);
+  ctx->VSSetConstantBuffers(0, 1, &oldVsCb);
+  ctx->PSSetConstantBuffers(0, 1, &oldPsCb);
+  ctx->PSSetShaderResources(0, 1, &oldSrv);
+  ctx->PSSetSamplers(0, 1, &oldSamp);
+  ctx->IASetPrimitiveTopology(oldTopo);
+  ctx->IASetInputLayout(oldLayout);
+  for (IUnknown* u : std::initializer_list<IUnknown*>{oldRtv, oldDsv, oldBlend, oldDepth, oldRaster, oldVs, oldPs, oldGs,
+                                                      oldVsCb, oldPsCb, oldSrv, oldSamp, oldLayout})
+    if (u) u->Release();
+  ctx->Release();
+
+  g_complete = 0;
+  for (int gi = 0; gi < data.constellations; ++gi) g_complete += complete(gi);
+  g_allocated = 0;
+  for (size_t i = 0; i < data.skills.size() && look.known; ++i) g_allocated += look.have[i];
 }
 
 void LoadGuarded() {
@@ -694,27 +854,64 @@ void LoadGuarded() {
 void Start() {
   if (g_started.exchange(true)) return;
   SetStatus("loading the devotion map from the game files...");
+  ResolveGameApi();
   g_loader = std::thread(LoadGuarded);
 }
 
+void SetLook(float incompleteBrightness, float glow) {
+  if (g_drawn.incomplete != incompleteBrightness || g_drawn.glow != glow) g_dirty = true;
+  g_drawn.incomplete = incompleteBrightness;
+  g_drawn.glow = glow;
+}
+
 void* MapSrv(IDXGISwapChain* swapChain) {
-  if (g_mapSrv || !g_loaded || g_failed) return g_mapSrv;
-  std::unique_ptr<MapData> data;
-  {
-    std::lock_guard lock(g_mutex);
-    data = std::move(g_data);
-  }
-  if (!data || !swapChain) return nullptr;
+  if (g_failed || !swapChain) return g_mapSrv;
   ID3D11Device* device = nullptr;
-  if (SUCCEEDED(swapChain->GetDevice(IID_PPV_ARGS(&device)))) {
-    if (Compose(device, *data))
-      SetStatus("devotion map: " + std::to_string(data->constellations) + " constellations (from the game files)");
-    else {
+  if (!g_map) {
+    if (!g_loaded) return nullptr;
+    {
+      std::lock_guard lock(g_mutex);
+      g_map = std::move(g_data);
+    }
+    if (!g_map) return nullptr;
+    if (FAILED(swapChain->GetDevice(IID_PPV_ARGS(&device)))) return nullptr;
+    if (!CreateGpu(device, *g_map)) {
       SetStatus("drawing the devotion map failed");
       g_failed = true;
+      device->Release();
+      return nullptr;
     }
-    device->Release();
+    Log("devotion: map texture %ux%u, %zu images", g_size, g_size, g_images.size());
+    g_dirty = true;
   }
+  // The player's progress, every 2 seconds.
+  static ULONGLONG lastQuery = 0;
+  if (g_api.ok && GetTickCount64() - lastQuery > 2000) {
+    lastQuery = GetTickCount64();
+    std::vector<uint8_t> have(g_map->skills.size(), 0);
+    uint32_t spent = 0;
+    const bool known = QueryStars(g_map->skillIndex, have, spent);
+    if (known != g_drawn.known || (known && have != g_drawn.have)) {
+      g_drawn.known = known;
+      g_drawn.have = std::move(have);
+      g_spent = spent;
+      g_dirty = true;
+    }
+  }
+  if (g_dirty) {
+    if (!device && FAILED(swapChain->GetDevice(IID_PPV_ARGS(&device)))) return g_mapSrv;
+    g_dirty = false;
+    Redraw(device, *g_map, g_drawn);
+    char status[160];
+    if (g_drawn.known)
+      snprintf(status, sizeof(status), "devotion map: %d constellations, %d complete, %d stars allocated (game says %u)",
+               g_map->constellations, g_complete, g_allocated, g_spent);
+    else
+      snprintf(status, sizeof(status), "devotion map: %d constellations (no character loaded)", g_map->constellations);
+    SetStatus(status);
+    Log("devotion: %s", status);
+  }
+  if (device) device->Release();
   return g_mapSrv;
 }
 
@@ -725,8 +922,8 @@ std::string Status() {
 
 void Shutdown() {
   if (g_loader.joinable()) g_loader.join();
-  SafeRelease(g_mapSrv);
-  SafeRelease(g_mapTex);
+  ReleaseGpu();
+  g_map.reset();
 }
 
 }  // namespace gdvr::devotion

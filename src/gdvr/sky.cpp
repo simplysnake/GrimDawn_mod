@@ -381,6 +381,7 @@ Layers Get(IDXGISwapChain* swapChain) {
   }
   if (xr::GetSettings().skySource == 0) {
     devotion::Start();
+    devotion::SetLook(xr::GetSettings().skyIncomplete, xr::GetSettings().skyGlow);
     return {devotion::MapSrv(swapChain), g_backSrv, true};
   }
   return {g_constSrv, g_backSrv, false};

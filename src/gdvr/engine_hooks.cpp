@@ -690,6 +690,8 @@ void PollControlFile() {
   vr.sky = getInt(L"sky", vr.sky) != 0;
   vr.skySource = getInt(L"sky_source", vr.skySource);
   vr.skyDomeHorizonDeg = getFloat(L"sky_dome_horizon", vr.skyDomeHorizonDeg);
+  vr.skyIncomplete = getFloat(L"sky_incomplete", vr.skyIncomplete);
+  vr.skyGlow = getFloat(L"sky_glow", vr.skyGlow);
   vr.credit = getInt(L"credit", vr.credit) != 0;
   vr.skyAutoOpen = getInt(L"sky_auto_open", vr.skyAutoOpen) != 0;
   {
