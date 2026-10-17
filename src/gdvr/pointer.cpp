@@ -44,6 +44,8 @@ std::mutex g_mutex;
 State g_state;
 // HUD pointing (render thread): smoothing, stickiness and the click lock.
 bool g_onPanelLast = false;
+std::atomic<double> g_parkUntil{0};
+  // cursor parked off-screen until (NowMs)
 float g_smoothX = 0, g_smoothY = 0;
 bool g_clickWasDown = false;
 double g_lockUntil = 0;
@@ -74,6 +76,25 @@ std::atomic<void*> g_keyboardDevice{nullptr}, g_mouseDevice{nullptr};
 std::atomic<bool> g_keyboardChecked{false};  // the game's own devices are known (Update hook)
 std::atomic<DWORD> g_sequence{0x40000000};
 std::atomic<unsigned long long> g_eventsSent{0};
+// Keys the mod taps itself (TapKey): pressed until the time given, applied directly in the hooks so a
+// tap is always released, whatever the rendering does (the pointer update stops in flat menus).
+std::atomic<double> g_forceUntil[256] = {};
+double HookNowMs() {
+  static LARGE_INTEGER freq = [] {
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return f;
+  }();
+  LARGE_INTEGER t;
+  QueryPerformanceCounter(&t);
+  return double(t.QuadPart) * 1000.0 / double(freq.QuadPart);
+}
+bool Forced(int k, double now) { return now < g_forceUntil[k].load(); }
+bool AnyForced(double now) {
+  for (int k = 0; k < 256; ++k)
+    if (Forced(k, now)) return true;
+  return false;
+}
 
 HMODULE g_gameInput = nullptr;
 using GetCursorPosFn = BOOL(WINAPI*)(LPPOINT);
@@ -114,7 +135,8 @@ HRESULT OnDeviceState(void* self, DWORD size, void* data, HRESULT hr, void* retu
   const bool keyboard = size == 256, mouse = size == sizeof(DIMOUSESTATE2) || size == sizeof(DIMOUSESTATE);
   if (!data || !(keyboard || mouse) || !FromGameInput(returnAddress)) return hr;
   if (!g_keyboardChecked) (keyboard ? g_keyboardDevice : g_mouseDevice) = self;
-  if (!g_active) return hr;
+  const double now = HookNowMs();
+  if (!g_active && !(keyboard && AnyForced(now))) return hr;
   if (FAILED(hr)) {
     std::memset(data, 0, size);
     hr = DI_OK;
@@ -123,7 +145,7 @@ HRESULT OnDeviceState(void* self, DWORD size, void* data, HRESULT hr, void* retu
   if (keyboard) {
     auto* keys = static_cast<BYTE*>(data);
     for (int k = 0; k < 256; ++k)
-      if (g_out.keys[k]) keys[k] = 0x80;
+      if ((g_active && g_out.keys[k]) || Forced(k, now)) keys[k] = 0x80;
   } else {
     auto* m = static_cast<DIMOUSESTATE*>(data);
     m->lX += g_motionX.exchange(0);
@@ -137,7 +159,9 @@ HRESULT OnDeviceState(void* self, DWORD size, void* data, HRESULT hr, void* retu
 HRESULT OnDeviceData(void* self, DWORD objectSize, DIDEVICEOBJECTDATA* data, DWORD* count, DWORD flags, DWORD capacity,
                      HRESULT hr, void* returnAddress) {
   const bool keyboard = self == g_keyboardDevice.load(), mouse = self == g_mouseDevice.load();
-  if (!g_active || !(keyboard || mouse) || !data || !count || objectSize != sizeof(DIDEVICEOBJECTDATA) ||
+  const double now = HookNowMs();
+  const bool forcing = keyboard && AnyForced(now);
+  if (!(g_active || forcing) || !(keyboard || mouse) || !data || !count || objectSize != sizeof(DIDEVICEOBJECTDATA) ||
       (flags & DIGDD_PEEK) || !FromGameInput(returnAddress))
     return hr;
   DWORD n = SUCCEEDED(hr) ? *count : 0;
@@ -155,8 +179,10 @@ HRESULT OnDeviceData(void* self, DWORD objectSize, DIDEVICEOBJECTDATA* data, DWO
   };
   std::lock_guard lock(g_outMutex);
   if (keyboard) {
-    for (int k = 0; k < 256; ++k)
-      if (g_out.keys[k] != g_keysSent[k] && add(DWORD(k), g_out.keys[k])) g_keysSent[k] = g_out.keys[k];
+    for (int k = 0; k < 256; ++k) {
+      const bool want = (g_active && g_out.keys[k]) || Forced(k, now);
+      if (want != g_keysSent[k] && add(DWORD(k), want)) g_keysSent[k] = want;
+    }
   } else {
     for (int b = 0; b < 2; ++b)
       if (g_out.buttons[b] != g_buttonsSent[b] && add(DWORD(DIMOFS_BUTTON0 + b), g_out.buttons[b]))
@@ -535,6 +561,10 @@ bool Install() {
 
 bool Live() { return LiveNow(); }
 
+void ParkCursor(double ms) { g_parkUntil = NowMs() + ms; }
+
+void TapKey(int dik) { g_forceUntil[dik & 0xFF] = HookNowMs() + 120.0; }
+
 void Update(Vec3 origin, Vec3 right, Vec3 up, Vec3 fwd, float scale, Vec3 target, bool haveTarget,
             const GameView& game) {
   g_lastUpdate = GetTickCount64();
@@ -646,6 +676,11 @@ void Update(Vec3 origin, Vec3 right, Vec3 up, Vec3 fwd, float scale, Vec3 target
         out.buttons[0] = true;
       }
     }
+  }
+  if (now < g_parkUntil.load()) {  // parked: off-screen, no clicks (screen captures without hover text)
+    feed = true;
+    feedX = feedY = -4000.0f;
+    out.buttons[0] = out.buttons[1] = false;
   }
   if (feed) {
     const long x = std::lround(feedX), y = std::lround(feedY);

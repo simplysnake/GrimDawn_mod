@@ -44,6 +44,8 @@ ID3D11Texture2D* g_hudCopy = nullptr;
 ID3D11ShaderResourceView* g_hudCopySrv = nullptr;
 ID3D11Buffer* g_cb = nullptr;
 ID3D11BlendState* g_blend = nullptr;
+ID3D11SamplerState* g_sampClamp = nullptr;
+ID3D11SamplerState* g_sampWrap = nullptr;
 ID3D11DepthStencilState* g_depthState = nullptr;
 ID3D11RasterizerState* g_raster = nullptr;
 ID3D11ShaderResourceView* g_depthSrv = nullptr;
@@ -70,7 +72,47 @@ cbuffer Params : register(b0) {
   float4 hud;     // HUD pass: x brightness, y opacity, z halo strength, w halo radius (px)
   float4 hud2;    // HUD pass: x alpha boost, y side-block shift (px, + = left), z outline
   float4 hud3;    // HUD pass: side block rect in px (x0, y0, x1, y1), as the game draws it
+  float4 sky0;    // sky: x constellations present, y backdrop present, z key, w key softness
+  float4 sky1;    // sky: xyz level forward, w band half width (rad)
+  float4 sky2;    // sky: xyz level right, w sky on
+  float4 sky3;    // sky: x band low, y band high (rad), z brightness, w opacity
+  float4 sky4;    // sky: crop of the capture (left, top, right, bottom)
+  float4 sky5;    // sky: x backdrop brightness, y dome mode, z dome rim elevation (rad)
 };
+Texture2D<float4> skyConst : register(t1);
+Texture2D<float4> skyBack : register(t2);
+SamplerState sampClamp : register(s0);
+SamplerState sampWrap : register(s1);
+
+static const float kPi = 3.14159265;
+
+// The sky in a world direction: the backdrop panorama, with the constellation band on top.
+float3 Sky(float3 dir) {
+  float3 up = float3(0, 1, 0);
+  float yaw = atan2(dot(dir, sky2.xyz), dot(dir, sky1.xyz));  // + = right of the forward direction
+  float elev = asin(clamp(dot(dir, up), -1, 1));
+  float3 c = float3(0, 0, 0);
+  if (sky0.y > 0) c = skyBack.SampleLevel(sampWrap, float2(yaw / (2 * kPi) + 0.5, 0.5 - elev / kPi), 0).rgb * sky5.x;
+  if (sky0.x > 0 && sky5.y > 0) {
+    // The devotion map as a dome: its centre straight overhead, its rim at sky5.z all around,
+    // its top in front of the game camera.
+    float r = (kPi / 2 - elev) / (kPi / 2 - sky5.z) * 0.5;
+    if (r < 0.5) {
+      float2 uv = 0.5 + r * float2(-sin(yaw), -cos(yaw));  // seen from inside: east-west swapped, like a sky chart
+      float4 s = skyConst.Sample(sampClamp, uv);
+      float edge = saturate((0.5 - r) * 30);
+      c = lerp(c, s.rgb * sky3.z, s.a * sky3.w * edge);
+    }
+  } else if (sky0.x > 0 && abs(yaw) < sky1.w && elev > sky3.x && elev < sky3.y) {
+    float2 t = float2(yaw / sky1.w * 0.5 + 0.5, 1 - (elev - sky3.x) / (sky3.y - sky3.x));
+    float4 s = skyConst.SampleLevel(sampClamp, lerp(sky4.xy, sky4.zw, t), 0);
+    float lum = max(s.r, max(s.g, s.b));
+    float a = smoothstep(sky0.z, sky0.z + sky0.w, lum) * sky3.w;
+    float edge = saturate(min(min(t.x, 1 - t.x), min(t.y, 1 - t.y)) * 12);  // soft band edges
+    c = lerp(c, s.rgb * sky3.z, a * edge);
+  }
+  return c;
+}
 Texture2D<float> depthTex : register(t0);
 Texture2D<float4> hudTex : register(t0);
 
@@ -85,7 +127,10 @@ VSOut VS(uint id : SV_VertexID) {
 
 float4 PS(VSOut i) : SV_Target {
   float d = depthTex.Load(int3(i.pos.xy, 0));
-  if (d >= 0.99999) return float4(color.rgb, color.a);       // nothing drawn here: keep the void black
+  float2 ndc0 = float2(i.uv.x * 2 - 1, 1 - i.uv.y * 2);
+  float3 dir = normalize(right.xyz * (ndc0.x * right.w) + up.xyz * (ndc0.y * up.w) + fwd.xyz);
+  float3 voidColor = sky2.w > 0 ? Sky(dir) : color.rgb;
+  if (d >= 0.99999) return float4(voidColor, sky2.w > 0 ? 1 : color.a);  // nothing drawn here: the void
   float n = fwd.w, f = origin.w;
   float z = n * f / (f - d * (f - n));                        // linear view depth
   float2 ndc = float2(i.uv.x * 2 - 1, 1 - i.uv.y * 2);
@@ -98,7 +143,7 @@ float4 PS(VSOut i) : SV_Target {
   }
   float a = smoothstep(fade.x, fade.y, dist);
   a = max(a, smoothstep(fade.z, fade.w, z));
-  return float4(color.rgb, a * color.a);
+  return float4(voidColor, a * color.a);  // fades into the sky (or black)
 }
 
 // Some HUD elements don't write alpha; their colour (premultiplied over black) says how visible they are.
@@ -148,6 +193,7 @@ float4 PSHud(VSOut i) : SV_Target {
 
 struct alignas(16) Constants {
   float right[4], up[4], fwd[4], origin[4], target[4], fade[4], color[4], hud[4], hud2[4], hud3[4];
+  float sky0[4], sky1[4], sky2[4], sky3[4], sky4[4], sky5[4];
 };
 
 template <typename T>
@@ -233,6 +279,14 @@ bool CreateResources() {
   rs.FillMode = D3D11_FILL_SOLID;
   rs.CullMode = D3D11_CULL_NONE;
   rs.DepthClipEnable = TRUE;
+  D3D11_SAMPLER_DESC samp{};
+  samp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+  samp.AddressU = samp.AddressV = samp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+  samp.MaxLOD = D3D11_FLOAT32_MAX;
+  D3D11_SAMPLER_DESC wrap = samp;
+  wrap.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+  if (FAILED(g_device->CreateSamplerState(&samp, &g_sampClamp)) || FAILED(g_device->CreateSamplerState(&wrap, &g_sampWrap)))
+    return false;
   return SUCCEEDED(g_device->CreateBuffer(&bd, nullptr, &g_cb)) &&
          SUCCEEDED(g_device->CreateBlendState(&blend, &g_blend)) &&
          SUCCEEDED(g_device->CreateDepthStencilState(&ds, &g_depthState)) &&
@@ -636,6 +690,21 @@ bool Apply(IDXGISwapChain* swapChain, const Params& p) {
       c.color[0] = p.debug ? 1.0f : 0.0f;
       c.color[1] = c.color[2] = 0;
       c.color[3] = p.strength;
+      const bool haveConst = p.skyConstellations != nullptr, haveBack = p.skyBackdrop != nullptr;
+      c.sky0[0] = haveConst ? 1.0f : 0.0f;
+      c.sky0[1] = haveBack ? 1.0f : 0.0f;
+      c.sky0[2] = p.key;
+      c.sky0[3] = std::max(0.001f, p.soft);
+      Set4(c.sky1, p.skyForward, p.bandHalfWidth);
+      Set4(c.sky2, p.skyRight, (haveConst || haveBack) && !p.debug ? 1.0f : 0.0f);
+      c.sky3[0] = p.bandLow;
+      c.sky3[1] = p.bandHigh;
+      c.sky3[2] = p.brightness;
+      c.sky3[3] = p.opacity;
+      for (int k = 0; k < 4; ++k) c.sky4[k] = p.crop[k];
+      c.sky5[0] = p.backdropBrightness;
+      c.sky5[1] = p.dome ? 1.0f : 0.0f;
+      c.sky5[2] = p.domeHorizon;
       ctx->Unmap(g_cb, 0);
     }
 
@@ -648,7 +717,11 @@ bool Apply(IDXGISwapChain* swapChain, const Params& p) {
     ctx->OMSetBlendState(g_blend, factor, 0xFFFFFFFF);
     ctx->OMSetDepthStencilState(g_depthState, 0);
     g_origOMSetRenderTargets(ctx, 1, &g_rtv, nullptr);
-    ctx->PSSetShaderResources(0, 1, &g_depthSrv);
+    ID3D11ShaderResourceView* srvs[3] = {g_depthSrv, static_cast<ID3D11ShaderResourceView*>(p.skyConstellations),
+                                         static_cast<ID3D11ShaderResourceView*>(p.skyBackdrop)};
+    ctx->PSSetShaderResources(0, 3, srvs);
+    ID3D11SamplerState* samplers[2] = {g_sampClamp, g_sampWrap};
+    ctx->PSSetSamplers(0, 2, samplers);
     ctx->PSSetConstantBuffers(0, 1, &g_cb);
     ctx->PSSetShader(g_ps, nullptr, 0);
     ctx->VSSetShader(g_vs, nullptr, 0);
@@ -658,8 +731,8 @@ bool Apply(IDXGISwapChain* swapChain, const Params& p) {
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->IASetInputLayout(nullptr);
     ctx->Draw(3, 0);
-    ID3D11ShaderResourceView* none = nullptr;
-    ctx->PSSetShaderResources(0, 1, &none);
+    ID3D11ShaderResourceView* none[3] = {};
+    ctx->PSSetShaderResources(0, 3, none);
     backup.Restore(ctx);
   }
 
@@ -789,6 +862,8 @@ void Shutdown() {
   SafeRelease(g_hudCopy);
   SafeRelease(g_cb);
   SafeRelease(g_blend);
+  SafeRelease(g_sampClamp);
+  SafeRelease(g_sampWrap);
   SafeRelease(g_depthState);
   SafeRelease(g_raster);
   SafeRelease(g_device);

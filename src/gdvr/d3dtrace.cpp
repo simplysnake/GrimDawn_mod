@@ -80,6 +80,61 @@ void Record(const std::string& line) {
 
 std::atomic<unsigned long long> g_totalDraws{0};
 
+// ---- UI phase: one-frame trace and texture skip list (render thread) ----------------------------
+// The UI is drawn after both eyes (onto the cleared back buffer) until Present. A trace lists the
+// draws per pixel-shader texture; the skip list drops draws using given texture kinds (size+format),
+// e.g. the UI frame and font while the Devotion screen is captured.
+bool g_ui = false;              // inside the UI phase
+bool g_uiTraceArmed = false;    // record the next UI phase
+bool g_uiTracing = false;
+ID3D11ShaderResourceView* g_psSrv0 = nullptr;  // pixel shader slot 0 as bound (not referenced)
+struct UiRun {
+  std::string texture;  // "WxH fN"
+  void* ptr;
+  int draws;
+  unsigned long long vertices;
+};
+std::vector<UiRun> g_uiRuns;
+std::vector<std::string> g_uiSkip;  // texture kinds to drop
+bool g_uiSkipActive = false;
+int g_uiSkipped = 0;
+
+std::string TextureKind(ID3D11ShaderResourceView* v, void** ptr) {
+  *ptr = nullptr;
+  if (!v) return "none";
+  ID3D11Resource* r = nullptr;
+  v->GetResource(&r);
+  std::string s = "?";
+  ID3D11Texture2D* t = nullptr;
+  if (r && SUCCEEDED(r->QueryInterface(IID_PPV_ARGS(&t)))) {
+    D3D11_TEXTURE2D_DESC d;
+    t->GetDesc(&d);
+    s = std::to_string(d.Width) + "x" + std::to_string(d.Height) + " f" + std::to_string(int(d.Format));
+    *ptr = t;
+    t->Release();
+  }
+  if (r) r->Release();
+  return s;
+}
+
+// Per UI draw: trace it, and say whether to drop it.
+bool UiDraw(unsigned long long vertices) {
+  if (!g_ui || !(g_uiTracing || g_uiSkipActive)) return false;
+  void* ptr;
+  const std::string kind = TextureKind(g_psSrv0, &ptr);
+  const bool skip = g_uiSkipActive && std::find(g_uiSkip.begin(), g_uiSkip.end(), kind) != g_uiSkip.end();
+  if (g_uiTracing) {
+    if (!g_uiRuns.empty() && g_uiRuns.back().ptr == ptr && g_uiRuns.back().texture == kind) {
+      ++g_uiRuns.back().draws;
+      g_uiRuns.back().vertices += vertices;
+    } else {
+      g_uiRuns.push_back({kind, ptr, 1, vertices});
+    }
+  }
+  if (skip) ++g_uiSkipped;
+  return skip;
+}
+
 void CountDraw() {
   ++g_totalDraws;
   if (g_eye < 0) return;
@@ -144,6 +199,7 @@ void NoteSrvs(const char* stage, UINT start, UINT n, ID3D11ShaderResourceView* c
 }
 void STDMETHODCALLTYPE H_PSSetSrv(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11ShaderResourceView* const* v) {
   Guard g;
+  if (s == 0 && n > 0) g_psSrv0 = v ? v[0] : nullptr;
   NoteSrvs("ps", s, n, v);
   o_PSSetSrv(c, s, n, v);
 }
@@ -154,16 +210,16 @@ void STDMETHODCALLTYPE H_VSSetSrv(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11
 }
 
 void STDMETHODCALLTYPE H_DrawIndexed(ID3D11DeviceContext* c, UINT a, UINT b, INT d) {
-  Guard g; CountDraw(); if (SkipDraw()) return; o_DrawIndexed(c, a, b, d);
+  Guard g; CountDraw(); if (SkipDraw() || UiDraw(a)) return; o_DrawIndexed(c, a, b, d);
 }
 void STDMETHODCALLTYPE H_Draw(ID3D11DeviceContext* c, UINT a, UINT b) {
-  Guard g; CountDraw(); if (SkipDraw()) return; o_Draw(c, a, b);
+  Guard g; CountDraw(); if (SkipDraw() || UiDraw(a)) return; o_Draw(c, a, b);
 }
 void STDMETHODCALLTYPE H_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT a, UINT b, UINT d, INT e, UINT f) {
-  Guard g; CountDraw(); if (SkipDraw()) return; o_DrawIndexedInstanced(c, a, b, d, e, f);
+  Guard g; CountDraw(); if (SkipDraw() || UiDraw(unsigned long long(a) * b)) return; o_DrawIndexedInstanced(c, a, b, d, e, f);
 }
 void STDMETHODCALLTYPE H_DrawInstanced(ID3D11DeviceContext* c, UINT a, UINT b, UINT d, UINT e) {
-  Guard g; CountDraw(); if (SkipDraw()) return; o_DrawInstanced(c, a, b, d, e);
+  Guard g; CountDraw(); if (SkipDraw() || UiDraw(unsigned long long(a) * b)) return; o_DrawInstanced(c, a, b, d, e);
 }
 void STDMETHODCALLTYPE H_DrawIndexedInstancedIndirect(ID3D11DeviceContext* c, ID3D11Buffer* b, UINT o) {
   Guard g; CountDraw(); o_DrawIndexedInstancedIndirect(c, b, o);
@@ -299,6 +355,50 @@ void OnSetRenderTargets(unsigned numViews, void* const* rtvs, void* dsv) {
 }
 
 int InFlight() { return g_inFlight.load(); }
+
+void BeginUi() {
+  g_ui = true;
+  g_uiTracing = g_uiTraceArmed;
+  g_uiTraceArmed = false;
+  g_uiRuns.clear();
+  g_uiSkipped = 0;
+}
+
+void EndUi() {
+  if (!g_ui) return;
+  g_ui = false;
+  if (!g_uiTracing) return;
+  g_uiTracing = false;
+#ifdef GDVR_DEV_LOG_DIR
+  const std::wstring path = std::wstring(GDVR_DEV_LOG_DIR) + L"/ui_trace.txt";
+#else
+  wchar_t base[MAX_PATH] = L".";
+  GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+  const std::wstring path = std::wstring(base) + L"\\gdvr\\ui_trace.txt";
+#endif
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, path.c_str(), L"w") == 0 && f) {
+    fprintf(f, "UI draws by pixel-shader texture (in order; consecutive draws with the same texture merged)\n");
+    int total = 0;
+    for (size_t i = 0; i < g_uiRuns.size(); ++i) {
+      const UiRun& r = g_uiRuns[i];
+      fprintf(f, "%4zu  %-16s %p  draws %4d  vertices %llu\n", i, r.texture.c_str(), r.ptr, r.draws, r.vertices);
+      total += r.draws;
+    }
+    fprintf(f, "total %d draws in %zu runs\n", total, g_uiRuns.size());
+    fclose(f);
+  }
+  Log("trace: UI frame traced (%zu texture runs) -> ui_trace.txt", g_uiRuns.size());
+}
+
+void ArmUiTrace() { g_uiTraceArmed = true; }
+
+void SetUiSkip(const std::vector<std::string>& kinds, bool active) {
+  g_uiSkip = kinds;
+  g_uiSkipActive = active && !kinds.empty();
+}
+
+int UiSkipped() { return g_uiSkipped; }
 
 unsigned long long TotalDraws() { return g_totalDraws.load(); }
 

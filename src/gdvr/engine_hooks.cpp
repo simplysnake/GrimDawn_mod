@@ -24,6 +24,7 @@
 #include "numbers.h"
 #include "perf.h"
 #include "pointer.h"
+#include "sky.h"
 #include "vr_math.h"
 #include "xr.h"
 
@@ -463,6 +464,26 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
       mp.depthStart = s.maskDepthStart;
       mp.strength = s.maskStrength;
       mp.debug = s.maskDebug;
+      if (s.sky) {
+        const sky::Layers layers = sky::Get(xr::GameSwapChain());
+        mp.skyConstellations = layers.constellations;
+        mp.skyBackdrop = layers.backdrop;
+        mp.dome = layers.dome;
+        mp.domeHorizon = s.skyDomeHorizonDeg * 3.14159265f / 180.0f;
+        const float yaw = s.skyBandYawDeg * 3.14159265f / 180.0f;
+        const Vec3 f0 = Normalize(Vec3{fwd.x, 0, fwd.z}), r0 = Normalize(Vec3{right.x, 0, right.z});
+        mp.skyForward = f0 * std::cos(yaw) + r0 * std::sin(yaw);
+        mp.skyRight = r0 * std::cos(yaw) - f0 * std::sin(yaw);
+        mp.bandHalfWidth = s.skyBandWidthDeg * 0.5f * 3.14159265f / 180.0f;
+        mp.bandLow = s.skyBandLowDeg * 3.14159265f / 180.0f;
+        mp.bandHigh = s.skyBandHighDeg * 3.14159265f / 180.0f;
+        for (int k = 0; k < 4; ++k) mp.crop[k] = s.skyCrop[k];
+        mp.key = s.skyKey;
+        mp.soft = s.skySoft;
+        mp.brightness = s.skyBrightness;
+        mp.opacity = s.skyOpacity;
+        mp.backdropBrightness = s.skyBackdropBrightness;
+      }
       xr::ApplyMask(mp);
     }
     {
@@ -491,6 +512,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
 
   // Both eyes are captured: from here on the game draws its HUD, onto a transparent back buffer.
   xr::PrepareHud();
+  d3dtrace::BeginUi();  // from here on the game draws its UI
 
   g_setFov(cam, savedFov);
   g_setAspect(cam, savedAspect);
@@ -665,6 +687,29 @@ void PollControlFile() {
   vr.labelsInWorld = getInt(L"labels_in_world", vr.labelsInWorld) != 0;
   vr.damageNumbers3d = getInt(L"damage_numbers_3d", vr.damageNumbers3d) != 0;
   vr.cameraPull = getFloat(L"camera_pull", vr.cameraPull);
+  vr.sky = getInt(L"sky", vr.sky) != 0;
+  vr.skySource = getInt(L"sky_source", vr.skySource);
+  vr.skyDomeHorizonDeg = getFloat(L"sky_dome_horizon", vr.skyDomeHorizonDeg);
+  vr.credit = getInt(L"credit", vr.credit) != 0;
+  vr.skyAutoOpen = getInt(L"sky_auto_open", vr.skyAutoOpen) != 0;
+  {
+    wchar_t wide[256];
+    GetPrivateProfileStringW(section, L"sky_skip_textures", L"", wide, 256, path.c_str());
+    if (wide[0]) WideCharToMultiByte(CP_UTF8, 0, wide, -1, vr.skySkip, sizeof(vr.skySkip), nullptr, nullptr);
+  }
+  vr.skyBandWidthDeg = getFloat(L"sky_band_width", vr.skyBandWidthDeg);
+  vr.skyBandLowDeg = getFloat(L"sky_band_low", vr.skyBandLowDeg);
+  vr.skyBandHighDeg = getFloat(L"sky_band_high", vr.skyBandHighDeg);
+  vr.skyBandYawDeg = getFloat(L"sky_band_yaw", vr.skyBandYawDeg);
+  vr.skyCrop[0] = getFloat(L"sky_crop_left", vr.skyCrop[0]);
+  vr.skyCrop[1] = getFloat(L"sky_crop_top", vr.skyCrop[1]);
+  vr.skyCrop[2] = getFloat(L"sky_crop_right", vr.skyCrop[2]);
+  vr.skyCrop[3] = getFloat(L"sky_crop_bottom", vr.skyCrop[3]);
+  vr.skyKey = getFloat(L"sky_key", vr.skyKey);
+  vr.skySoft = getFloat(L"sky_soft", vr.skySoft);
+  vr.skyBrightness = getFloat(L"sky_brightness", vr.skyBrightness);
+  vr.skyOpacity = getFloat(L"sky_opacity", vr.skyOpacity);
+  vr.skyBackdropBrightness = getFloat(L"sky_backdrop_brightness", vr.skyBackdropBrightness);
   vr.itemLabels3d = getInt(L"item_labels_3d", vr.itemLabels3d) != 0;
   vr.pointer = getInt(L"pointer", vr.pointer) != 0;
   vr.pointerHand = getInt(L"pointer_hand", vr.pointerHand) != 0 ? 1 : 0;

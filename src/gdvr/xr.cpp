@@ -21,6 +21,8 @@
 
 #include "d3dtrace.h"
 #include "input.h"
+#include "overlay.h"
+#include "sky.h"
 #include "perf.h"
 #include "log.h"
 
@@ -306,7 +308,7 @@ void PollEvents() {
 // HUD look for this frame: the dark backing behind HUD elements follows scene brightness.
 float g_hudLum = -1.0f;    // smoothed scene brightness
 float g_hudDayAmount = 0;  // 0 = night look, 1 = daylight look
-bool g_hudMenuOpen = false;  // a game menu is open (from HUD coverage)
+std::atomic<bool> g_hudMenuOpen{false};  // a game menu is open (from HUD coverage); read without g_mutex
 
 mask::HudLook CurrentHudLook() {
   const float lum = mask::SceneBrightness();
@@ -364,6 +366,29 @@ bool SaveSettingsLocked() {
   put(L"recompute_frustum", s.recomputeFrustum);
   put(L"far_plane", s.farPlane);
   put(L"camera_pull", s.cameraPull);
+  put(L"sky", s.sky);
+  put(L"sky_source", s.skySource);
+  put(L"sky_dome_horizon", s.skyDomeHorizonDeg);
+  put(L"credit", s.credit);
+  put(L"sky_auto_open", s.skyAutoOpen);
+  {
+    wchar_t wide[256];
+    MultiByteToWideChar(CP_UTF8, 0, s.skySkip, -1, wide, 256);
+    ok &= WritePrivateProfileStringW(L"vr", L"sky_skip_textures", wide, path.c_str()) != 0;
+  }
+  put(L"sky_band_width", s.skyBandWidthDeg);
+  put(L"sky_band_low", s.skyBandLowDeg);
+  put(L"sky_band_high", s.skyBandHighDeg);
+  put(L"sky_band_yaw", s.skyBandYawDeg);
+  put(L"sky_crop_left", s.skyCrop[0]);
+  put(L"sky_crop_top", s.skyCrop[1]);
+  put(L"sky_crop_right", s.skyCrop[2]);
+  put(L"sky_crop_bottom", s.skyCrop[3]);
+  put(L"sky_key", s.skyKey);
+  put(L"sky_soft", s.skySoft);
+  put(L"sky_brightness", s.skyBrightness);
+  put(L"sky_opacity", s.skyOpacity);
+  put(L"sky_backdrop_brightness", s.skyBackdropBrightness);
   put(L"screen_distance", s.screenDistance);
   put(L"screen_width", s.screenWidth);
   put(L"mask", s.maskEnabled);
@@ -402,6 +427,24 @@ bool SaveSettingsLocked() {
   return ok;
 }
 
+// "Grim Dawn VR - created by artalva.com" on the HUD panel for the first seconds in VR (fades out).
+void DrawCredit() {
+  static ULONGLONG start = 0;
+  if (!g_settings.credit) return;
+  if (!start) start = GetTickCount64();
+  const double t = double(GetTickCount64() - start) / 1000.0;
+  constexpr double kShow = 8.0, kFade = 2.0;
+  if (t > kShow) return;
+  const float alpha = float(t < kShow - kFade ? 1.0 : (kShow - t) / kFade);
+  const unsigned a = unsigned(alpha * 255.0f) << 24;
+  const float w = float(g_hudChain.width), h = float(g_hudChain.height);
+  overlay::WorldText lines[2] = {
+      {w * 0.5f, h * 0.30f, h * 0.06f, 0x00FFFFFFu | a, "Grim Dawn VR", false},
+      {w * 0.5f, h * 0.37f, h * 0.035f, 0x00B0D8FFu | a, "created by artalva.com", false},
+  };
+  overlay::DrawWorldText(lines, 2);
+}
+
 // Ends the frame begun by the previous OnPresent, submitting whatever was captured for it.
 void EndFrame() {
   XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -428,6 +471,8 @@ void EndFrame() {
 
       // HUD: the game drew only its UI onto the cleared back buffer; show it on a floating panel.
       if (g_settings.hud && g_hudPrepared) {
+        sky::OnHudFrame(g_gameSwapChain);  // Devotion screen capture (UI layer, before the HUD pass)
+        DrawCredit();
         mask::FixHudAlpha(g_gameSwapChain, CurrentHudLook());
         if (CaptureBackBuffer(g_hudChain)) {
           const float tilt = -g_settings.hudTiltDeg * 3.14159265f / 180.0f;
@@ -444,7 +489,7 @@ void EndFrame() {
           layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&hudQuad));
         }
       }
-    } else if (g_settings.mode != Mode::Off && CaptureBackBuffer(g_screenChain)) {
+    } else if (g_settings.mode != Mode::Off && (sky::OnHudFrame(g_gameSwapChain), CaptureBackBuffer(g_screenChain))) {
       // Screen mode, or stereo with nothing rendered this frame (menus, loading): flat screen.
       const Quat yaw = g_ref.orientation;
       quad.space = g_localSpace;
@@ -529,6 +574,7 @@ bool SaveSettings() {
 }
 
 void OnPresent(IDXGISwapChain* swapChain) {
+  d3dtrace::EndUi();
   std::lock_guard lock(g_mutex);
   g_gameSwapChain = swapChain;
   if (!g_device) {
@@ -656,9 +702,10 @@ bool HudSolidAt(float u, float v, bool sticky) {
 }
 
 bool HudMenuOpen() {
-  std::lock_guard lock(g_mutex);
-  return g_hudMenuOpen;
+  return g_hudMenuOpen.load();  // no lock: also called from code that runs while g_mutex is held
 }
+
+IDXGISwapChain* GameSwapChain() { return g_gameSwapChain; }
 
 Pose EyePose(int eye) {
   std::lock_guard lock(g_mutex);
@@ -870,6 +917,32 @@ void DrawDebugUI() {
     ImGui::RadioButton("Left hand", &g_settings.pointerHand, 0);
     ImGui::SameLine();
     ImGui::RadioButton("Right hand", &g_settings.pointerHand, 1);
+  }
+
+  if (ImGui::CollapsingHeader("Sky (constellations)")) {
+    ImGui::Checkbox("Sky beyond the play area (needs the fade mask)", &g_settings.sky);
+    ImGui::SameLine();
+    ImGui::Checkbox("Start-up credit", &g_settings.credit);
+    ImGui::Checkbox("Refresh constellations at start (opens the Devotion screen with D for a moment)", &g_settings.skyAutoOpen);
+    ImGui::InputText("Leave out of capture", g_settings.skySkip, sizeof(g_settings.skySkip));
+    ImGui::RadioButton("Devotion map from the game files (dome)", &g_settings.skySource, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("Screen capture (band)", &g_settings.skySource, 1);
+    if (g_settings.skySource == 0)
+      ImGui::SliderFloat("Dome rim elevation (deg)", &g_settings.skyDomeHorizonDeg, -45.0f, 30.0f, "%.0f");
+    sky::DrawDebugUI();
+    ImGui::SliderFloat("Turn (deg)", &g_settings.skyBandYawDeg, -180.0f, 180.0f, "%.0f");
+    if (g_settings.skySource == 1) {  // screen capture only
+      ImGui::SliderFloat("Band width (deg)", &g_settings.skyBandWidthDeg, 40.0f, 360.0f, "%.0f");
+      ImGui::SliderFloat("Band bottom (deg)", &g_settings.skyBandLowDeg, -60.0f, 60.0f, "%.0f");
+      ImGui::SliderFloat("Band top (deg)", &g_settings.skyBandHighDeg, 0.0f, 90.0f, "%.0f");
+      ImGui::SliderFloat4("Crop L T R B", g_settings.skyCrop, 0.0f, 1.0f, "%.2f");
+      ImGui::SliderFloat("Background cut", &g_settings.skyKey, 0.0f, 0.6f, "%.2f");
+      ImGui::SliderFloat("Cut softness", &g_settings.skySoft, 0.01f, 0.5f, "%.2f");
+    }
+    ImGui::SliderFloat("Constellation brightness", &g_settings.skyBrightness, 0.2f, 3.0f, "%.2f");
+    ImGui::SliderFloat("Constellation opacity", &g_settings.skyOpacity, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Backdrop brightness", &g_settings.skyBackdropBrightness, 0.0f, 2.0f, "%.2f");
   }
 
   if (ImGui::CollapsingHeader("World")) {

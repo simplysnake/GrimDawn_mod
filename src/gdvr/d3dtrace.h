@@ -3,6 +3,9 @@
 // eye's render for one frame, and writes both sequences side by side to
 // %LOCALAPPDATA%\gdvr\trace_eye0.txt / trace_eye1.txt, to find passes missing from one eye.
 
+#include <string>
+#include <vector>
+
 struct ID3D11DeviceContext;
 
 namespace gdvr::d3dtrace {
@@ -25,6 +28,15 @@ int SkipSegment();
 
 // Draw calls seen so far on the game's context (all of them, recording or not).
 unsigned long long TotalDraws();
+
+// UI phase (after both eyes, the game draws only its UI until Present).
+void BeginUi();
+void EndUi();
+// Record the next UI phase: draws per pixel-shader texture -> logs/ui_trace.txt.
+void ArmUiTrace();
+// Drop UI draws whose texture kind ("WxH fN") is listed, while active.
+void SetUiSkip(const std::vector<std::string>& kinds, bool active);
+int UiSkipped();
 
 int InFlight();
 

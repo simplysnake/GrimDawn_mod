@@ -2,3 +2,5 @@ build/
 bin/
 __pycache__/
 logs/
+sky/
+skybox/

@@ -25,7 +25,24 @@ struct Settings {
   float maskOuter = 62.0f;      // ... and where it is fully black
   float maskDepthStart = 0.85f; // fraction of the far plane where the far-plane fade starts
   float maskStrength = 1.0f;    // 0..1
-  bool maskDebug = false;       // distance rings (green inside, red fading, blue black)
+  bool maskDebug = false;
+  // Sky beyond the play area (sky.h): backdrop panorama + captured devotion constellations.
+  bool credit = true;
+  bool skyAutoOpen = false;      // open the Devotion screen (D) once per session to refresh the constellations
+  char skySkip[256] = "";        // UI texture kinds left out of the capture ("WxH fN, ..."), from the UI trace             // "created by artalva.com" on the HUD panel when VR starts
+  bool sky = true;
+  int skySource = 0;               // constellations: 0 = the devotion map from the game files (dome), 1 = screen capture (band)
+  float skyDomeHorizonDeg = -5.0f; // the map's rim sits at this elevation (its centre straight overhead)
+  float skyBandWidthDeg = 150.0f;  // how wide the constellation band is around you
+  float skyBandLowDeg = 2.0f;      // band from this elevation...
+  float skyBandHighDeg = 55.0f;    // ...to this one
+  float skyBandYawDeg = 0.0f;      // turn the band (0 = in front of the game camera)
+  float skyCrop[4] = {0.0f, 0.0f, 1.0f, 1.0f};  // part of the capture used (left, top, right, bottom)
+  float skyKey = 0.10f;            // capture brightness below this is background (transparent)
+  float skySoft = 0.15f;           // ...fading in over this much
+  float skyBrightness = 1.2f;
+  float skyOpacity = 1.0f;
+  float skyBackdropBrightness = 1.0f;       // distance rings (green inside, red fading, blue black)
   int maskDepthPick = 0;        // which screen-sized depth buffer: 0 = first bound (the G-buffer pass, cleared per eye), -1 = last
   bool hud = true;              // show the game's HUD on a floating panel in stereo mode
   float hudDistance = 0.72f;    // metres in front of the recentred position
@@ -63,6 +80,9 @@ struct Settings {
 };
 
 Settings& GetSettings();
+
+// The game's swap chain (null before the first frame).
+IDXGISwapChain* GameSwapChain();
 
 // Where the line from the centre of your eyes to a point (recentred space, metres) crosses the HUD
 // panel, in HUD image fractions (0..1 across, 0..1 down). False if the panel is behind you or edge-on.

@@ -29,6 +29,12 @@ void Update(Vec3 origin, Vec3 right, Vec3 up, Vec3 fwd, float scale, Vec3 target
 // Draws the laser and the cursor ring into this eye's image.
 void DrawEye(const numbers::EyeView& view);
 
+// Moves the game's cursor off-screen for a while (screen captures without hover text).
+void ParkCursor(double ms);
+
+// Presses and releases a key in the game (DirectInput code, e.g. DIK_D), render thread.
+void TapKey(int dik);
+
 // True while stereo frames keep updating the pointer.
 bool Live();
 

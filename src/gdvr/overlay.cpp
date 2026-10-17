@@ -16,6 +16,7 @@
 #include "log.h"
 #include "d3dtrace.h"
 #include "mask.h"
+#include "sky.h"
 #include "perf.h"
 #include "xr.h"
 
@@ -293,6 +294,7 @@ void Teardown() {
   if (g_tornDown.exchange(true)) return;
   xr::Shutdown();
   mask::Shutdown();
+  sky::Shutdown();
   perf::Shutdown();
   if (g_origWndProc) SetWindowLongPtrW(g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_origWndProc));
   if (g_imguiReady) {

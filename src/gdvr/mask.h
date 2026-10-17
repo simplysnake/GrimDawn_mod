@@ -18,6 +18,16 @@ struct Params {
   float depthStart = 0.85f;         // fraction of the far plane where the far-plane fade starts
   float strength = 1.0f;            // max darkness, 0..1
   bool debug = false;               // show distance rings instead of the fade
+  // Sky drawn instead of black (sky.h). Null views = layer missing; no layers = black as before.
+  void* skyConstellations = nullptr;  // ID3D11ShaderResourceView*
+  void* skyBackdrop = nullptr;        // ID3D11ShaderResourceView*
+  Vec3 skyForward, skyRight;          // level frame the sky is laid out in (game camera, horizontal)
+  float bandHalfWidth = 1.3f;         // radians
+  float bandLow = 0.03f, bandHigh = 0.96f;  // elevations, radians
+  float crop[4] = {0, 0, 1, 1};
+  float key = 0.1f, soft = 0.15f, brightness = 1.2f, opacity = 1.0f, backdropBrightness = 1.0f;
+  bool dome = false;           // constellations = devotion map as a dome overhead (its own alpha)
+  float domeHorizon = -0.09f;  // the map's rim elevation, radians
 };
 
 // Hooks ID3D11DeviceContext::OMSetRenderTargets (once) so the scene depth buffer can be found.

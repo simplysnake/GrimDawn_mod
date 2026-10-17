@@ -53,6 +53,7 @@ target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/
 # The mod itself, injected into Grim Dawn.exe
 add_library(gdvr SHARED
   src/gdvr/d3dtrace.cpp
+  src/gdvr/devotion.cpp
   src/gdvr/dllmain.cpp
   src/gdvr/engine_hooks.cpp
   src/gdvr/overlay.cpp
@@ -62,9 +63,10 @@ add_library(gdvr SHARED
   src/gdvr/mask.cpp
   src/gdvr/numbers.cpp
   src/gdvr/perf.cpp
+  src/gdvr/sky.cpp
   src/gdvr/pointer.cpp
   src/gdvr/xr.cpp)
-target_link_libraries(gdvr PRIVATE minhook imgui openxr_loader d3d11 dxgi d3dcompiler dinput8 dxguid)
+target_link_libraries(gdvr PRIVATE minhook imgui openxr_loader d3d11 dxgi d3dcompiler dinput8 dxguid windowscodecs ole32)
 target_compile_definitions(gdvr PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 # Development builds also log into the repo (logs/), readable from tools that can't see %LOCALAPPDATA%.
 target_compile_definitions(gdvr PRIVATE GDVR_DEV_LOG_DIR=L"${CMAKE_SOURCE_DIR}/logs")
