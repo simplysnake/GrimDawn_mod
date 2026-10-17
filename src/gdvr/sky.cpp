@@ -41,134 +41,6 @@ std::wstring g_backdropPath;           // the backdrop file in use (watched for 
 FILETIME g_backdropTime = {};
 ULONGLONG g_lastWatch = 0;
 
-// ---- Recognising the Devotion screen ---------------------------------------------------------------
-// A small grey thumbnail of the UI layer is compared with one of the saved capture: when they match,
-// the Devotion screen is open and is recaptured (once per opening), so the sky follows your progress.
-constexpr int kThumbLevel = 6;  // mip level: 2560x1440 -> 40x22
-std::vector<float> g_refThumb;  // reference (from the capture), luminance 0..1
-UINT g_refW = 0, g_refH = 0;
-ID3D11Texture2D* g_thumbTex = nullptr;  // UI layer with a mip chain
-ID3D11ShaderResourceView* g_thumbSrv = nullptr;
-ID3D11Texture2D* g_thumbStaging = nullptr;
-bool g_thumbPending = false;
-UINT g_thumbW = 0, g_thumbH = 0;
-int g_thumbFrame = 0;
-int g_matchStreak = 0;
-bool g_capturedThisOpening = false;
-float g_lastMatch = 0;
-
-// Box-averaged luminance thumbnail of an RGBA image, same size as mip level kThumbLevel.
-void MakeReference(const std::vector<uint8_t>& rgba, UINT w, UINT h) {
-  g_refW = std::max(1u, w >> kThumbLevel);
-  g_refH = std::max(1u, h >> kThumbLevel);
-  g_refThumb.assign(size_t(g_refW) * g_refH, 0.0f);
-  const UINT bx = w / g_refW, by = h / g_refH;
-  for (UINT ty = 0; ty < g_refH; ++ty)
-    for (UINT tx = 0; tx < g_refW; ++tx) {
-      double sum = 0;
-      for (UINT y = ty * by; y < (ty + 1) * by; y += 2)
-        for (UINT x = tx * bx; x < (tx + 1) * bx; x += 2) {
-          const uint8_t* p = &rgba[(size_t(y) * w + x) * 4];
-          sum += (p[0] + p[1] + p[2]) / (3.0 * 255.0);
-        }
-      g_refThumb[size_t(ty) * g_refW + tx] = float(sum / ((by / 2.0) * (bx / 2.0)));
-    }
-}
-
-// Normalised correlation of two thumbnails (1 = same picture).
-float Similarity(const std::vector<float>& a, const std::vector<float>& b) {
-  if (a.size() != b.size() || a.empty()) return 0;
-  double ma = 0, mb = 0;
-  for (size_t i = 0; i < a.size(); ++i) {
-    ma += a[i];
-    mb += b[i];
-  }
-  ma /= a.size();
-  mb /= b.size();
-  double sab = 0, saa = 0, sbb = 0;
-  for (size_t i = 0; i < a.size(); ++i) {
-    sab += (a[i] - ma) * (b[i] - mb);
-    saa += (a[i] - ma) * (a[i] - ma);
-    sbb += (b[i] - mb) * (b[i] - mb);
-  }
-  return saa > 1e-9 && sbb > 1e-9 ? float(sab / std::sqrt(saa * sbb)) : 0.0f;
-}
-
-void ReleaseThumb() {
-  SafeRelease(g_thumbStaging);
-  SafeRelease(g_thumbSrv);
-  SafeRelease(g_thumbTex);
-  g_thumbPending = false;
-}
-
-// Every 15 frames: thumbnail of the UI layer (GPU mip chain, read back without stalling).
-// Returns true when the Devotion screen has just been recognised (time to capture).
-bool WatchForDevotion(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* bb) {
-  if (g_refThumb.empty() || ++g_thumbFrame % 15) return false;
-  D3D11_TEXTURE2D_DESC bd;
-  bb->GetDesc(&bd);
-  if (g_thumbTex) {
-    D3D11_TEXTURE2D_DESC t;
-    g_thumbTex->GetDesc(&t);
-    if (t.Width != bd.Width || t.Height != bd.Height || t.Format != bd.Format) ReleaseThumb();
-  }
-  if (!g_thumbTex) {
-    D3D11_TEXTURE2D_DESC t = bd;
-    t.MipLevels = kThumbLevel + 1;
-    t.Usage = D3D11_USAGE_DEFAULT;
-    t.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-    t.CPUAccessFlags = 0;
-    t.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
-    D3D11_TEXTURE2D_DESC s = bd;
-    s.Width = std::max(1u, bd.Width >> kThumbLevel);
-    s.Height = std::max(1u, bd.Height >> kThumbLevel);
-    s.MipLevels = 1;
-    s.Usage = D3D11_USAGE_STAGING;
-    s.BindFlags = 0;
-    s.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    s.MiscFlags = 0;
-    if (FAILED(device->CreateTexture2D(&t, nullptr, &g_thumbTex)) ||
-        FAILED(device->CreateShaderResourceView(g_thumbTex, nullptr, &g_thumbSrv)) ||
-        FAILED(device->CreateTexture2D(&s, nullptr, &g_thumbStaging))) {
-      ReleaseThumb();
-      return false;
-    }
-    g_thumbW = s.Width;
-    g_thumbH = s.Height;
-  }
-  bool recognised = false;
-  if (g_thumbPending) {
-    D3D11_MAPPED_SUBRESOURCE m;
-    if (ctx->Map(g_thumbStaging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m) == S_OK) {
-      std::vector<float> cur(size_t(g_thumbW) * g_thumbH);
-      for (UINT y = 0; y < g_thumbH; ++y) {
-        const uint8_t* row = static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch;
-        for (UINT x = 0; x < g_thumbW; ++x)
-          cur[size_t(y) * g_thumbW + x] = (row[x * 4] + row[x * 4 + 1] + row[x * 4 + 2]) / (3.0f * 255.0f);
-      }
-      ctx->Unmap(g_thumbStaging, 0);
-      g_thumbPending = false;
-      g_lastMatch = (g_thumbW == g_refW && g_thumbH == g_refH) ? Similarity(cur, g_refThumb) : 0.0f;
-      if (g_lastMatch > 0.85f) {
-        if (++g_matchStreak >= 2 && !g_capturedThisOpening) {
-          g_capturedThisOpening = true;
-          recognised = true;
-        }
-      } else if (g_lastMatch < 0.6f) {
-        g_matchStreak = 0;
-        g_capturedThisOpening = false;  // the screen was closed: capture again next time it opens
-      }
-    }
-  }
-  if (!g_thumbPending) {
-    ctx->CopySubresourceRegion(g_thumbTex, 0, 0, 0, 0, bb, 0, nullptr);
-    ctx->GenerateMips(g_thumbSrv);
-    ctx->CopySubresourceRegion(g_thumbStaging, 0, 0, 0, 0, g_thumbTex, kThumbLevel, nullptr);
-    g_thumbPending = true;
-  }
-  return recognised;
-}
-
 FILETIME WriteTime(const std::wstring& path) {
   WIN32_FILE_ATTRIBUTE_DATA a{};
   if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) return {};
@@ -278,8 +150,7 @@ void LoadAll(ID3D11Device* device) {
   std::vector<uint8_t> px;
   UINT w = 0, h = 0;
   std::string status;
-  if (LoadImageFile(dir + L"/constellations.png", px, w, h) && MakeTexture(device, px, w, h, g_constTex, g_constSrv) &&
-      (MakeReference(px, w, h), true))
+  if (LoadImageFile(dir + L"/constellations.png", px, w, h) && MakeTexture(device, px, w, h, g_constTex, g_constSrv))
     status += "constellations " + std::to_string(w) + "x" + std::to_string(h);
   else
     status += "no constellations captured";
@@ -347,7 +218,6 @@ void Capture(IDXGISwapChain* swapChain) {
       const std::wstring path = SkyDir() + L"/constellations.png";
       const bool saved = SavePng(path, px.data(), d.Width, d.Height, d.Width * 4);
       MakeTexture(device, px, d.Width, d.Height, g_constTex, g_constSrv);
-      MakeReference(px, d.Width, d.Height);  // recognise the Devotion screen from now on
       g_status = std::string("constellations captured ") + std::to_string(d.Width) + "x" + std::to_string(d.Height) +
                  (saved ? "" : " (saving failed)");
       Log("sky: captured the Devotion screen %ux%u -> %ls %s", d.Width, d.Height, path.c_str(), saved ? "" : "(save FAILED)");
@@ -414,68 +284,9 @@ std::vector<std::string> SkipList() {
   return out;
 }
 
-// Once per session: open the Devotion screen (D), capture it, close it again.
-enum class Auto { Waiting, Opening, Capturing, Done };
-Auto g_auto = Auto::Waiting;
-ULONGLONG g_liveSince = 0, g_stepAt = 0;
-
-void AutoOpen() {
-  const ULONGLONG now = GetTickCount64();
-  const bool live = pointer::Live();
-  if (!live) g_liveSince = 0;
-  else if (!g_liveSince) g_liveSince = now;
-  switch (g_auto) {
-    case Auto::Waiting:
-      // In the world in VR for a while, no menu open: open it.
-      if (xr::GetSettings().skyAutoOpen && g_liveSince && now - g_liveSince > 8000 && !xr::HudMenuOpen()) {
-        Log("sky: opening the Devotion screen (D) to refresh the constellations");
-        pointer::TapKey(DIK_D);
-        g_capturedThisOpening = true;  // this opening is captured by the sequence, not by the watcher
-        g_auto = Auto::Opening;
-        g_stepAt = now;
-      }
-      break;
-    case Auto::Opening:
-      // Open (recognised, or a menu covers the screen) or, without a reference yet, after a moment.
-      if ((g_lastMatch > 0.85f || xr::HudMenuOpen()) && now - g_stepAt > 600 || now - g_stepAt > 1500) {
-        RequestCapture();
-        g_auto = Auto::Capturing;
-        g_stepAt = now;
-      }
-      break;
-    case Auto::Capturing:
-      if (g_captureCountdown.load() < 0 && now - g_stepAt > 300) {
-        pointer::TapKey(DIK_D);  // close it again
-        Log("sky: Devotion screen closed again");
-        g_auto = Auto::Done;
-      }
-      break;
-    case Auto::Done:
-      break;
-  }
-}
-
 }  // namespace
 
 void OnHudFrame(IDXGISwapChain* swapChain) {
-  AutoOpen();
-  // Watch for the Devotion screen (only once a capture exists to recognise it by).
-  if (!g_refThumb.empty() && g_captureCountdown.load() < 0) {
-    ID3D11Texture2D* bb = nullptr;
-    if (SUCCEEDED(swapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) {
-      ID3D11Device* device = nullptr;
-      bb->GetDevice(&device);
-      ID3D11DeviceContext* ctx = nullptr;
-      device->GetImmediateContext(&ctx);
-      if (WatchForDevotion(device, ctx, bb)) {
-        Log("sky: Devotion screen recognised (match %.2f): recapturing the constellations", g_lastMatch);
-        RequestCapture();
-      }
-      ctx->Release();
-      device->Release();
-      bb->Release();
-    }
-  }
   int n = g_captureCountdown.load();
   if (n < 0) return;
   if (n > 0) {
@@ -493,16 +304,15 @@ void OnHudFrame(IDXGISwapChain* swapChain) {
 void DrawDebugUI() {
   ImGui::TextDisabled("Sky: %s", g_status.c_str());
   ImGui::TextDisabled("Devotion map: %s", devotion::Status().c_str());
-  ImGui::TextDisabled(g_refThumb.empty() ? "Auto-refresh: capture once, then opening the Devotion screen updates the sky"
-                                         : "Auto-refresh on: Devotion screen match %.2f", g_lastMatch);
-  if (ImGui::Button("Capture constellations (open the Devotion screen first)")) RequestCapture();
-  ImGui::SameLine();
+  if (xr::GetSettings().skySource == 1) {
+    if (ImGui::Button("Capture constellations (open the Devotion screen first)")) RequestCapture();
+    ImGui::SameLine();
+  }
   if (ImGui::Button("Reload sky images")) RequestReload();
 }
 
 void Shutdown() {
   devotion::Shutdown();
-  ReleaseThumb();
   SafeRelease(g_constSrv);
   SafeRelease(g_constTex);
   SafeRelease(g_backSrv);

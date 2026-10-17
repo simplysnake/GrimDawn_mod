@@ -28,7 +28,6 @@ struct Settings {
   bool maskDebug = false;
   // Sky beyond the play area (sky.h): backdrop panorama + captured devotion constellations.
   bool credit = true;
-  bool skyAutoOpen = false;      // open the Devotion screen (D) once per session to refresh the constellations
   char skySkip[256] = "";        // UI texture kinds left out of the capture ("WxH fN, ..."), from the UI trace             // "created by artalva.com" on the HUD panel when VR starts
   bool sky = true;
   int skySource = 0;               // constellations: 0 = the devotion map from the game files (dome), 1 = screen capture (band)

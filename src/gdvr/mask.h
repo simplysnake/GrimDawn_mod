@@ -69,6 +69,8 @@ float HudCoverage();
 // HUD opacity around an image position (fractions 0..1) from a 160x90 map read back every few
 // frames; -1 if not measured yet.
 float HudAlphaAt(float u, float v);
+// Share (0..1) of a HUD region (fractions of the image) where something is drawn, or -1 if not measured yet.
+float HudRegionCoverage(float u0, float v0, float u1, float v1);
 
 // ---- Per-eye depth history ---------------------------------------------------------------
 // The engine's geometry pass samples a copy of the PREVIOUS render's depth (soft blending of

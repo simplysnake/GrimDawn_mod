@@ -417,6 +417,7 @@ bool DeviceFunctions(REFIID iid, void*& state, void*& dataFn) {
 // Right trigger = left click at the laser, left trigger = right click; left stick walks; face
 // buttons hotbar 1-4; right-stick flicks hotbar 5-8; grips potions; stick clicks W / Y (both =
 // recentre); left trackpad/view: inventory (hold: map); right trackpad/menu: game menu (hold: character).
+// Sliding a thumb on the touch pads (no press) zooms (right) and turns the camera (left): PadCamera.
 constexpr double kTapMs = 90;
 constexpr double kHoldMs = 500;
 
@@ -488,6 +489,93 @@ void MapControls(const XINPUT_GAMEPAD& c, double now, Output& out) {
 
   for (int k = 0; k < 256; ++k)
     if (now < l.tapUntil[k]) out.keys[k] = true;
+}
+
+// ---- Touch pads: the game camera (Index) -----------------------------------------------------------
+// Sliding the thumb along the right pad zooms (up = closer), along the left pad turns the camera, like
+// a scroll wheel: only the movement counts, so touching down anywhere does nothing. A hard press (the
+// menus) stops it, so the press doesn't zoom or turn.
+constexpr float kZoomPerPad = 5.0f;   // GameCamera::Zoom units per pad unit (10 = the whole range)
+constexpr float kYawPerPad = 1.2f;    // radians per pad unit (sliding the whole pad: ~140 degrees)
+constexpr float kPadDeadband = 0.01f; // per-frame jitter ignored
+constexpr float kMaxYawPerFrame = 0.025f;  // radians: a quick slide turns smoothly instead of jumping
+                                           // (a jump brings a lot of new ground into view at once)
+
+struct CameraApi {
+  void** engine = nullptr;                       // &gGameEngine
+  void* (*getCamera)(void* engine) = nullptr;    // GameEngine::GetCamera
+  void (*zoom)(void* camera, float amount, bool now) = nullptr;  // target zoom += amount * 0.1 (0..1)
+  void (*adjustYaw)(void* camera, float radians) = nullptr;
+  bool ok = false;
+};
+CameraApi g_cam;
+
+void ResolveCamera() {
+  static bool tried = false;
+  if (tried) return;
+  tried = true;
+  HMODULE game = GetModuleHandleW(L"Game.dll");
+  if (!game) return;
+  g_cam.engine = reinterpret_cast<void**>(GetProcAddress(game, "?gGameEngine@GAME@@3PEAVGameEngine@1@EA"));
+  g_cam.getCamera = reinterpret_cast<void* (*)(void*)>(
+      GetProcAddress(game, "?GetCamera@GameEngine@GAME@@QEAAPEAVGameCamera@2@XZ"));
+  g_cam.zoom = reinterpret_cast<void (*)(void*, float, bool)>(GetProcAddress(game, "?Zoom@GameCamera@GAME@@QEAAXM_N@Z"));
+  g_cam.adjustYaw = reinterpret_cast<void (*)(void*, float)>(
+      GetProcAddress(game, "?AdjustYaw@GameCamera@GAME@@QEAAXM@Z"));
+  g_cam.ok = g_cam.engine && g_cam.getCamera && g_cam.zoom && g_cam.adjustYaw;
+  Log("pointer: touch-pad camera control %s", g_cam.ok ? "ready" : "UNAVAILABLE (camera functions not found)");
+}
+
+bool CameraStep(float zoom, float yaw) {
+  __try {
+    void* engine = *g_cam.engine;
+    void* camera = engine ? g_cam.getCamera(engine) : nullptr;
+    if (!camera) return false;
+    if (zoom != 0) g_cam.zoom(camera, zoom, false);
+    if (yaw != 0) g_cam.adjustYaw(camera, yaw);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+struct PadSlide {
+  bool touching = false;
+  float lastY = 0;
+  // Movement along the pad since last frame (0 when just touched, released or pressed).
+  float Step(bool touch, bool press, float y) {
+    float d = 0;
+    if (touch && !press && touching) d = y - lastY;
+    touching = touch && !press;
+    lastY = y;
+    return std::fabs(d) < kPadDeadband ? 0.0f : d;
+  }
+};
+PadSlide g_zoomPad, g_turnPad;
+float g_yawPending = 0;  // turn still to apply (radians), spread over frames
+float g_yawLogged = 0;   // turned since the last log line
+ULONGLONG g_yawLogAt = 0;
+
+void PadCamera(bool inWorld) {
+  const input::TouchPads p = input::Pads();
+  const float zoom = g_zoomPad.Step(p.rightTouch, p.rightPress, p.right.y);
+  const float turn = g_turnPad.Step(p.leftTouch, p.leftPress, p.left.y);
+  if (!inWorld || xr::HudMenuOpen()) {
+    g_yawPending = 0;
+    return;
+  }
+  g_yawPending += turn * kYawPerPad;
+  const float yaw = std::clamp(g_yawPending, -kMaxYawPerFrame, kMaxYawPerFrame);
+  g_yawPending -= yaw;
+  if (zoom == 0 && yaw == 0) return;
+  ResolveCamera();
+  if (!g_cam.ok || !CameraStep(-zoom * kZoomPerPad, yaw)) return;  // slide up = closer
+  g_yawLogged += yaw;
+  if (GetTickCount64() - g_yawLogAt > 2000 && g_yawLogged != 0) {
+    g_yawLogAt = GetTickCount64();
+    Log("pointer: camera turned %.0f deg (touch pad)", g_yawLogged * 57.2958f);
+    g_yawLogged = 0;
+  }
 }
 
 double NowMs() {
@@ -674,6 +762,8 @@ void Update(Vec3 origin, Vec3 right, Vec3 up, Vec3 fwd, float scale, Vec3 target
   }
 
   g_onPanelLast = st.onPanel;
+
+  PadCamera(haveTarget);
 
   // Pointer mode: the controls become mouse and keyboard.
   XINPUT_GAMEPAD c{};

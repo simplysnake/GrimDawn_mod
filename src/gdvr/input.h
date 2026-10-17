@@ -32,6 +32,15 @@ bool LocateAim(int hand, XrSpace base, XrTime time, XrPosef& pose);
 // and keyboard input. Returns false when the controls go to the game as a gamepad instead.
 bool PointerControls(XINPUT_GAMEPAD& controls);
 
+// The touch pads (Index): where the thumb is (-1..1) while touched, and whether the pad is pressed
+// hard (that opens the menus).
+struct TouchPads {
+  XrVector2f left{0, 0}, right{0, 0};
+  bool leftTouch = false, rightTouch = false;
+  bool leftPress = false, rightPress = false;
+};
+TouchPads Pads();
+
 // Forgets the action set (call before the session/instance are destroyed).
 void DestroyActions();
 

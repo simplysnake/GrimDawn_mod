@@ -525,7 +525,7 @@ ID3D11ShaderResourceView* MakeImage(ID3D11Device* device, const std::vector<uint
 }
 
 // ---- Which stars the player has (asked from the running game) --------------------------------------
-// gGameEngine -> GameEngine::GetMainPlayer -> Character::GetSkillManager -> SkillManager::FindSkillId
+// gGameEngine -> GameEngine::GetMainPlayer -> Character::GetSkillManager -> its skills and their levels
 // (0 when the player doesn't have that skill). Devotion stars are skills once allocated.
 // Every devotion star exists as a skill object; an allocated one has a level above 0.
 struct GameApi {

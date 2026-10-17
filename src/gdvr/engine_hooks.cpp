@@ -472,7 +472,8 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
         mp.dome = layers.dome;
         mp.domeHorizon = s.skyDomeHorizonDeg * 3.14159265f / 180.0f;
         const float yaw = s.skyBandYawDeg * 3.14159265f / 180.0f;
-        const Vec3 f0 = Normalize(Vec3{fwd.x, 0, fwd.z}), r0 = Normalize(Vec3{right.x, 0, right.z});
+        // Laid out on the world's axes, not the camera's: turning the camera turns the sky with the ground.
+        const Vec3 f0{0, 0, 1}, r0 = Cross(f0, Vec3{0, 1, 0});
         mp.skyForward = f0 * std::cos(yaw) + r0 * std::sin(yaw);
         mp.skyRight = r0 * std::cos(yaw) - f0 * std::sin(yaw);
         mp.bandHalfWidth = s.skyBandWidthDeg * 0.5f * 3.14159265f / 180.0f;
@@ -694,7 +695,6 @@ void PollControlFile() {
   vr.skyIncomplete = getFloat(L"sky_incomplete", vr.skyIncomplete);
   vr.skyGlow = getFloat(L"sky_glow", vr.skyGlow);
   vr.credit = getInt(L"credit", vr.credit) != 0;
-  vr.skyAutoOpen = getInt(L"sky_auto_open", vr.skyAutoOpen) != 0;
   {
     wchar_t wide[256];
     GetPrivateProfileStringW(section, L"sky_skip_textures", L"", wide, 256, path.c_str());

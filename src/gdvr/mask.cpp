@@ -566,6 +566,18 @@ void MeasureBrightness(IDXGISwapChain* swapChain) {
 float SceneBrightness() { return g_sceneMeter.value.load(); }
 float HudCoverage() { return g_hudMeter.value.load(); }
 
+float HudRegionCoverage(float u0, float v0, float u1, float v1) {
+  std::lock_guard lock(g_hudMeter.gridMutex);
+  if (g_hudMeter.grid.empty()) return -1.0f;
+  const UINT x0 = UINT(u0 * g_hudMeter.gridW), x1 = std::min(g_hudMeter.gridW, UINT(u1 * g_hudMeter.gridW));
+  const UINT y0 = UINT(v0 * g_hudMeter.gridH), y1 = std::min(g_hudMeter.gridH, UINT(v1 * g_hudMeter.gridH));
+  int drawn = 0, total = 0;
+  for (UINT y = y0; y < y1; ++y)
+    for (UINT x = x0; x < x1; ++x, ++total)
+      if (g_hudMeter.grid[size_t(y) * g_hudMeter.gridW + x] > 77) ++drawn;  // alpha > 0.3
+  return total ? float(drawn) / float(total) : -1.0f;
+}
+
 float HudAlphaAt(float u, float v) {
   std::lock_guard lock(g_hudMeter.gridMutex);
   if (g_hudMeter.grid.empty() || u < 0 || u > 1 || v < 0 || v > 1) return -1.0f;

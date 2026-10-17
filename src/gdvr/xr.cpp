@@ -326,8 +326,10 @@ mask::HudLook CurrentHudLook() {
   static ULONGLONG lastLog = 0;
   if (GetTickCount64() - lastLog > 5000) {
     lastLog = GetTickCount64();
-    Log("hud: scene brightness %.3f -> daylight %.2f, coverage %.3f (menu %d)%s", g_hudLum, g_hudDayAmount,
-        mask::HudCoverage(), int(g_hudMenuOpen), g_inWorld ? "" : " title screen: black keyed out");
+    Log("hud: scene brightness %.3f -> daylight %.2f, coverage %.3f (inventory area %.2f, character area %.2f, "
+        "menu %d)%s", g_hudLum, g_hudDayAmount, mask::HudCoverage(),
+        mask::HudRegionCoverage(0.62f, 0.55f, 0.95f, 0.80f), mask::HudRegionCoverage(0.05f, 0.30f, 0.38f, 0.80f),
+        int(g_hudMenuOpen), g_inWorld ? "" : " title screen: black keyed out");
   }
   auto mix = [](float a, float b, float t) { return a + (b - a) * t; };
   mask::HudLook look;
@@ -344,13 +346,19 @@ mask::HudLook CurrentHudLook() {
     return engine ? reinterpret_cast<bool (*)()>(GetProcAddress(engine, "?IsGameTimePaused@GAME@@YA_NXZ")) : nullptr;
   }();
   const bool paused = isPaused && isPaused();
+  // The inventory (right) and character (left) windows: big panels where the playing HUD leaves the
+  // screen empty (below the minimap block, above the skill bar). Their total coverage is close to the
+  // playing HUD's, so they are recognised by place.
+  const float invPanel = mask::HudRegionCoverage(0.62f, 0.55f, 0.95f, 0.80f);
+  const float charPanel = mask::HudRegionCoverage(0.05f, 0.30f, 0.38f, 0.80f);
+  const bool panel = invPanel > 0.6f || charPanel > 0.6f;
   const float coverage = mask::HudCoverage();
   static bool covered = false;
   if (coverage >= 0) {
     if (!covered && coverage > g_settings.hudMenuCoverage) covered = true;
     if (covered && coverage < g_settings.hudMenuCoverage * 0.85f) covered = false;  // hysteresis
   }
-  g_hudMenuOpen = covered || paused;
+  g_hudMenuOpen = covered || paused || panel;
   look.sideShift = g_hudMenuOpen ? 0.0f : g_settings.hudSideShift;
   look.sideWidth = g_settings.hudSideWidth;
   look.sideHeight = g_settings.hudSideHeight;
@@ -383,7 +391,6 @@ bool SaveSettingsLocked() {
   put(L"sky_incomplete", s.skyIncomplete);
   put(L"sky_glow", s.skyGlow);
   put(L"credit", s.credit);
-  put(L"sky_auto_open", s.skyAutoOpen);
   {
     wchar_t wide[256];
     MultiByteToWideChar(CP_UTF8, 0, s.skySkip, -1, wide, 256);
@@ -949,7 +956,6 @@ void DrawDebugUI() {
     ImGui::Checkbox("Sky beyond the play area (needs the fade mask)", &g_settings.sky);
     ImGui::SameLine();
     ImGui::Checkbox("Start-up credit", &g_settings.credit);
-    ImGui::Checkbox("Refresh constellations at start (opens the Devotion screen with D for a moment)", &g_settings.skyAutoOpen);
     ImGui::InputText("Leave out of capture", g_settings.skySkip, sizeof(g_settings.skySkip));
     ImGui::RadioButton("Devotion map from the game files (dome)", &g_settings.skySource, 0);
     ImGui::SameLine();

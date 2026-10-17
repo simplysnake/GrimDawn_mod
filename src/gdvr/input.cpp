@@ -34,6 +34,7 @@ enum ActionId {
   kLStickClick, kRStickClick,
   kStart, kBack,
   kDpadUp, kDpadDown, kDpadLeft, kDpadRight,
+  kLeftPad, kRightPad, kLeftPadTouch, kRightPadTouch,
   kRecenter,
   kAimPose,
   kActionCount
@@ -64,6 +65,10 @@ const ActionDef kActions[kActionCount] = {
     {"dpad_down", "D-pad down", XR_ACTION_TYPE_BOOLEAN_INPUT},
     {"dpad_left", "D-pad left", XR_ACTION_TYPE_BOOLEAN_INPUT},
     {"dpad_right", "D-pad right", XR_ACTION_TYPE_BOOLEAN_INPUT},
+    {"left_pad", "Left touch pad (slide: turn camera)", XR_ACTION_TYPE_VECTOR2F_INPUT},
+    {"right_pad", "Right touch pad (slide: zoom)", XR_ACTION_TYPE_VECTOR2F_INPUT},
+    {"left_pad_touch", "Left touch pad touched", XR_ACTION_TYPE_BOOLEAN_INPUT},
+    {"right_pad_touch", "Right touch pad touched", XR_ACTION_TYPE_BOOLEAN_INPUT},
     {"recenter", "Recenter view", XR_ACTION_TYPE_BOOLEAN_INPUT},
     {"aim", "Pointer (laser aim)", XR_ACTION_TYPE_POSE_INPUT},
 };
@@ -90,6 +95,10 @@ const Binding kIndexBindings[] = {
     {kRStickClick, "/user/hand/right/input/thumbstick/click"},
     {kStart, "/user/hand/right/input/trackpad/force"},
     {kBack, "/user/hand/left/input/trackpad/force"},
+    {kLeftPad, "/user/hand/left/input/trackpad"},
+    {kRightPad, "/user/hand/right/input/trackpad"},
+    {kLeftPadTouch, "/user/hand/left/input/trackpad/touch"},
+    {kRightPadTouch, "/user/hand/right/input/trackpad/touch"},
     {kAimPose, "/user/hand/left/input/aim/pose"},
     {kAimPose, "/user/hand/right/input/aim/pose"},
 };
@@ -169,6 +178,7 @@ const Profile kProfiles[] = {
 XrActionSet g_actionSet = XR_NULL_HANDLE;
 XrAction g_actions[kActionCount] = {};
 XINPUT_GAMEPAD g_vrControls = {};  // VR controls as a pad (under g_padMutex)
+TouchPads g_pads;                  // the touch pads (under g_padMutex)
 bool g_pointerMode = false;
 XrPath g_handPaths[2] = {};
 XrSpace g_aimSpaces[2] = {};  // controller aim pose (pointer ray) per hand
@@ -471,6 +481,7 @@ bool CreateActions(XrInstance instance, XrSession session) {
 bool Sync(XrSession session, bool focused) {
   if (!g_actionSet) return false;
   XINPUT_GAMEPAD pad = {};
+  TouchPads pads;
   bool anyActive = false;
   bool recenter = false;
 
@@ -524,6 +535,12 @@ bool Sync(XrSession session, bool focused) {
         if (getBool(b.id)) pad.wButtons |= b.bit;
       if (getBool(kStart)) pad.wButtons |= XINPUT_GAMEPAD_START;
       if (getBool(kBack)) pad.wButtons |= XINPUT_GAMEPAD_BACK;
+      pads.left = getVec(kLeftPad);
+      pads.right = getVec(kRightPad);
+      pads.leftTouch = getBool(kLeftPadTouch);
+      pads.rightTouch = getBool(kRightPadTouch);
+      pads.leftPress = (pad.wButtons & XINPUT_GAMEPAD_BACK) != 0;
+      pads.rightPress = (pad.wButtons & XINPUT_GAMEPAD_START) != 0;
 
       const bool r = getBool(kRecenter);
       recenter = r && !g_lastRecenter;
@@ -536,6 +553,7 @@ bool Sync(XrSession session, bool focused) {
   // virtual gamepad stays silent and the game leaves its gamepad mode. Without stereo frames (main
   // menu, loading) there is no pointer, so the gamepad takes over again.
   g_vrControls = pad;
+  g_pads = pads;
   g_pointerMode = anyActive && xr::GetSettings().pointer && !xr::GetSettings().pureController && pointer::Live();
   if (g_pointerMode) {
     pad = {};
@@ -545,6 +563,11 @@ bool Sync(XrSession session, bool focused) {
   g_pad = pad;
   g_padActive = anyActive;
   return recenter;
+}
+
+TouchPads Pads() {
+  std::lock_guard lock(g_padMutex);
+  return g_pads;
 }
 
 bool PointerControls(XINPUT_GAMEPAD& controls) {
