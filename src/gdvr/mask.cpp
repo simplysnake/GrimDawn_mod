@@ -70,7 +70,7 @@ cbuffer Params : register(b0) {
   float4 fade;    // x inner, y outer (horizontal distance), z/w far-plane fade start/end (view depth)
   float4 color;   // a = strength
   float4 hud;     // HUD pass: x brightness, y opacity, z halo strength, w halo radius (px)
-  float4 hud2;    // HUD pass: x alpha boost, y side-block shift (px, + = left), z outline
+  float4 hud2;    // HUD pass: x alpha boost, y side-block shift (px, + = left), z outline, w key black
   float4 hud3;    // HUD pass: side block rect in px (x0, y0, x1, y1), as the game draws it
   float4 sky0;    // sky: x constellations present, y backdrop present, z key, w key softness
   float4 sky1;    // sky: xyz level forward, w band half width (rad)
@@ -148,7 +148,12 @@ float4 PS(VSOut i) : SV_Target {
 
 // Some HUD elements don't write alpha; their colour (premultiplied over black) says how visible they are.
 // The boost makes dark-but-drawn pixels solid instead of see-through (which looked additive).
-float Coverage(float4 c) { return saturate(max(c.a, max(c.r, max(c.g, c.b)) * hud2.x)); }
+// Key black: the alpha is ignored and dark parts fade out (the title screen's opaque black backdrop).
+float Coverage(float4 c) {
+  float l = max(c.r, max(c.g, c.b));
+  if (hud2.w > 0) return smoothstep(0.03, 0.12, l);
+  return saturate(max(c.a, l * hud2.x));
+}
 
 bool InRect(float2 p, float4 r) { return p.x >= r.x && p.x < r.z && p.y >= r.y && p.y < r.w; }
 
@@ -612,6 +617,7 @@ bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look) {
       const float w = float(bbDesc.Width), h = float(bbDesc.Height);
       c.hud2[1] = std::round(look.sideShift * w);
       c.hud2[2] = look.sideOutline ? 1.0f : 0.0f;
+      c.hud2[3] = look.keyBlack ? 1.0f : 0.0f;
       c.hud3[0] = std::round(w * (1 - look.sideWidth));
       c.hud3[1] = 0;
       c.hud3[2] = w;

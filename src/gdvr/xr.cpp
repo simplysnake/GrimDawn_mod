@@ -28,6 +28,7 @@
 
 namespace gdvr::xr {
 
+void DumpBackBuffer(const std::wstring& name, bool alpha);  // F11 image dump (below)
 namespace {
 
 constexpr double kInitRetryMs = 5000.0;
@@ -78,6 +79,7 @@ bool g_eyeCaptured[2] = {};
 float g_eyeTan[2][2] = {};
 uint64_t g_framesSubmitted = 0;
 double g_lastWaitMs = 0;
+std::atomic<bool> g_inWorld{true};  // false on the title screen (no character to follow)
 std::atomic<int> g_dumpEyes{0};  // F11: bit per eye still to dump
 
 double NowMs() { return double(GetTickCount64()); }
@@ -324,8 +326,8 @@ mask::HudLook CurrentHudLook() {
   static ULONGLONG lastLog = 0;
   if (GetTickCount64() - lastLog > 5000) {
     lastLog = GetTickCount64();
-    Log("hud: scene brightness %.3f -> daylight %.2f, coverage %.3f (menu %d)", g_hudLum, g_hudDayAmount,
-        mask::HudCoverage(), int(g_hudMenuOpen));
+    Log("hud: scene brightness %.3f -> daylight %.2f, coverage %.3f (menu %d)%s", g_hudLum, g_hudDayAmount,
+        mask::HudCoverage(), int(g_hudMenuOpen), g_inWorld ? "" : " title screen: black keyed out");
   }
   auto mix = [](float a, float b, float t) { return a + (b - a) * t; };
   mask::HudLook look;
@@ -334,12 +336,21 @@ mask::HudLook CurrentHudLook() {
   look.halo = mix(g_settings.hudHalo, g_settings.hudHaloDay, g_hudDayAmount);
   look.haloRadius = mix(g_settings.hudHaloRadius, g_settings.hudHaloRadiusDay, g_hudDayAmount);
   look.alphaBoost = g_settings.hudAlphaBoost;
+  look.keyBlack = !g_inWorld;  // title screen: its menu layer is opaque black around the buttons
   // A menu (inventory, options, map...) covers much of the HUD image: put the block back while it's open.
+  // Small menus (the Esc game menu) cover too little, but they pause the game: count that too.
+  static const auto isPaused = [] {
+    HMODULE engine = GetModuleHandleW(L"Engine.dll");
+    return engine ? reinterpret_cast<bool (*)()>(GetProcAddress(engine, "?IsGameTimePaused@GAME@@YA_NXZ")) : nullptr;
+  }();
+  const bool paused = isPaused && isPaused();
   const float coverage = mask::HudCoverage();
+  static bool covered = false;
   if (coverage >= 0) {
-    if (!g_hudMenuOpen && coverage > g_settings.hudMenuCoverage) g_hudMenuOpen = true;
-    if (g_hudMenuOpen && coverage < g_settings.hudMenuCoverage * 0.85f) g_hudMenuOpen = false;  // hysteresis
+    if (!covered && coverage > g_settings.hudMenuCoverage) covered = true;
+    if (covered && coverage < g_settings.hudMenuCoverage * 0.85f) covered = false;  // hysteresis
   }
+  g_hudMenuOpen = covered || paused;
   look.sideShift = g_hudMenuOpen ? 0.0f : g_settings.hudSideShift;
   look.sideWidth = g_settings.hudSideWidth;
   look.sideHeight = g_settings.hudSideHeight;
@@ -475,7 +486,13 @@ void EndFrame() {
       if (g_settings.hud && g_hudPrepared) {
         sky::OnHudFrame(g_gameSwapChain);  // Devotion screen capture (UI layer, before the HUD pass)
         DrawCredit();
+        if (g_dumpEyes & 4) DumpBackBuffer(L"hud_raw", false);  // the UI as the game drew it
         mask::FixHudAlpha(g_gameSwapChain, CurrentHudLook());
+        if (g_dumpEyes & 4) {  // ...and as shown on the panel
+          DumpBackBuffer(L"hud", false);
+          DumpBackBuffer(L"hud_alpha", true);
+          g_dumpEyes &= ~4;
+        }
         if (CaptureBackBuffer(g_hudChain)) {
           const float tilt = -g_settings.hudTiltDeg * 3.14159265f / 180.0f;
           const Quat pitch{std::sin(tilt * 0.5f), 0, 0, std::cos(tilt * 0.5f)};
@@ -588,7 +605,7 @@ void OnPresent(IDXGISwapChain* swapChain) {
   // F10 recentres.
   static bool f7Was = false, f9Was = false, f10Was = false, f11Was = false;
   const bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
-  if (f11 && !f11Was) g_dumpEyes = 3;
+  if (f11 && !f11Was) g_dumpEyes = 7;  // both eyes + the HUD
   f11Was = f11;
   const bool f7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
   if (f7 && !f7Was) {
@@ -721,9 +738,10 @@ void EyeTanFov(int eye, float& tanHalfX, float& tanHalfY) {
   tanHalfY = std::max(std::tan(std::fabs(f.angleUp)), std::tan(std::fabs(f.angleDown)));
 }
 
-// ---- Eye image dump (F11): writes what each eye receives to %LOCALAPPDATA%\gdvr\eyeN.bmp ----
+// ---- Image dump (F11): what each eye receives and the HUD (eyeN.bmp, hud*.bmp) -----------------
 
-void DumpBackBuffer(int eye) {
+// Writes the game's back buffer as a BMP (dev builds: <repo>/logs). alpha = the alpha channel as grey.
+void DumpBackBuffer(const std::wstring& name, bool alpha) {
   ID3D11Texture2D* bb = nullptr;
   if (FAILED(g_gameSwapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) return;
   D3D11_TEXTURE2D_DESC d;
@@ -745,15 +763,19 @@ void DumpBackBuffer(int eye) {
         uint8_t* out = px.data() + size_t(d.Height - 1 - y) * d.Width * 3;  // BMP rows go bottom-up
         for (UINT x = 0; x < d.Width; ++x) {
           const uint8_t* p = row + x * 4;
-          out[x * 3 + 0] = rgba ? p[2] : p[0];
-          out[x * 3 + 1] = p[1];
-          out[x * 3 + 2] = rgba ? p[0] : p[2];
+          out[x * 3 + 0] = alpha ? p[3] : (rgba ? p[2] : p[0]);
+          out[x * 3 + 1] = alpha ? p[3] : p[1];
+          out[x * 3 + 2] = alpha ? p[3] : (rgba ? p[0] : p[2]);
         }
       }
       g_context->Unmap(staging, 0);
+#ifdef GDVR_DEV_LOG_DIR
+      const std::wstring path = std::wstring(GDVR_DEV_LOG_DIR) + L"/" + name + L".bmp";
+#else
       wchar_t base[MAX_PATH];
       GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
-      const std::wstring path = std::wstring(base) + L"\\gdvr\\eye" + std::to_wstring(eye) + L".bmp";
+      const std::wstring path = std::wstring(base) + L"\\gdvr\\" + name + L".bmp";
+#endif
       FILE* f = nullptr;
       if (_wfopen_s(&f, path.c_str(), L"wb") == 0 && f) {
         const uint32_t dataSize = uint32_t(px.size()), fileSize = 54 + dataSize;
@@ -769,7 +791,7 @@ void DumpBackBuffer(int eye) {
         fwrite(h, 1, 54, f);
         fwrite(px.data(), 1, px.size(), f);
         fclose(f);
-        Log("dumped eye %d image (%ux%u)", eye, d.Width, d.Height);
+        Log("dumped %ls (%ux%u)", name.c_str(), d.Width, d.Height);
       }
     }
     staging->Release();
@@ -810,7 +832,7 @@ void CaptureEye(int eye, float tanHalfX, float tanHalfY) {
   if (!g_frameBegun) return;
   eye &= 1;
   if (g_dumpEyes & (1 << eye)) {
-    DumpBackBuffer(eye);
+    DumpBackBuffer(L"eye" + std::to_wstring(eye), false);
     g_dumpEyes &= ~(1 << eye);
   }
   if (eye == 0 && g_settings.hudDayAdapt) mask::MeasureBrightness(g_gameSwapChain);
@@ -821,7 +843,9 @@ void CaptureEye(int eye, float tanHalfX, float tanHalfY) {
 
 double LastWaitMs() { return g_lastWaitMs; }
 
-void RequestEyeDump() { g_dumpEyes = 3; }
+void RequestEyeDump() { g_dumpEyes = 7; }
+
+void SetInWorld(bool inWorld) { g_inWorld = inWorld; }
 
 void Shutdown() {
   std::lock_guard lock(g_mutex);

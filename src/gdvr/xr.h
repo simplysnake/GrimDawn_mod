@@ -114,6 +114,9 @@ void OnPresent(IDXGISwapChain* swapChain);
 // True when this frame should be rendered once per eye.
 bool StereoFrameActive();
 
+// Whether the world being rendered has a character in it (false on the title screen). From the renderer.
+void SetInWorld(bool inWorld);
+
 // Eye pose for this frame, relative to the recentred origin (OpenXR axes: +Y up, -Z forward, metres).
 Pose EyePose(int eye);
 

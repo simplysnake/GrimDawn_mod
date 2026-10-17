@@ -113,11 +113,43 @@ bool FromGameInput(void* returnAddress) {
          mod == g_gameInput;
 }
 
+// The game's own modules (besides DirectInput.dll) may read the cursor too, e.g. in menus that pause
+// the game: they get the pointer's position as well.
+HMODULE g_gameModules[3] = {};  // GrimDawn.exe, Engine.dll, Game.dll
+bool FromGame(void* returnAddress, HMODULE& mod) {
+  mod = nullptr;
+  if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          static_cast<LPCWSTR>(returnAddress), &mod))
+    return false;
+  if (mod == g_gameInput) return true;
+  for (HMODULE m : g_gameModules)
+    if (m && mod == m) return true;
+  return false;
+}
+// Who asks for the cursor (diagnostic, logged with the pointer status).
+struct CursorCaller {
+  std::atomic<HMODULE> mod{nullptr};
+  std::atomic<unsigned long long> calls{0}, fed{0};
+};
+CursorCaller g_cursorCallers[8];
+void CountCursorCaller(HMODULE mod, bool fed) {
+  for (CursorCaller& c : g_cursorCallers) {
+    HMODULE expected = nullptr;
+    if (c.mod.load() == mod || c.mod.compare_exchange_strong(expected, mod) || expected == mod) {
+      ++c.calls;
+      if (fed) ++c.fed;
+      return;
+    }
+  }
+}
+
 BOOL WINAPI HookGetCursorPos(LPPOINT point) {
   ++g_inFlight;
   BOOL ok = FALSE;
   bool fed = false;
-  if (point && g_active && g_feeding && FromGameInput(_ReturnAddress())) {
+  HMODULE caller;
+  const bool fromGame = FromGame(_ReturnAddress(), caller);
+  if (point && g_active && g_feeding && fromGame) {
     if (HWND window = overlay::GameWindow()) {
       POINT p{g_feedX.load(), g_feedY.load()};
       if (ClientToScreen(window, &p)) {
@@ -127,6 +159,7 @@ BOOL WINAPI HookGetCursorPos(LPPOINT point) {
     }
   }
   if (!fed) ok = g_origGetCursorPos(point);
+  CountCursorCaller(caller, fed);
   --g_inFlight;
   return ok;
 }
@@ -519,6 +552,9 @@ bool LiveNow() { return GetTickCount64() - g_lastUpdate.load() < 250; }
 
 bool Install() {
   g_gameInput = GetModuleHandleW(L"DirectInput.dll");
+  g_gameModules[0] = GetModuleHandleW(nullptr);
+  g_gameModules[1] = GetModuleHandleW(L"Engine.dll");
+  g_gameModules[2] = GetModuleHandleW(L"Game.dll");
   if (!g_gameInput) {
     Log("pointer: DirectInput.dll not loaded (no mouse/keyboard feed)");
     return false;
@@ -711,6 +747,18 @@ void Update(Vec3 origin, Vec3 right, Vec3 up, Vec3 fwd, float scale, Vec3 target
     Log("pointer: mode %s, window client %ldx%ld, game image %.0fx%.0f, %llu input events sent, %llu game mouse actions",
         active ? "mouse+keyboard" : "gamepad/off", rc.right - rc.left, rc.bottom - rc.top, game.width, game.height,
         g_eventsSent.load(), g_actions.load());
+    std::string callers;
+    for (const CursorCaller& c : g_cursorCallers) {
+      HMODULE m = c.mod.load();
+      if (!m) continue;
+      wchar_t name[MAX_PATH] = L"?";
+      GetModuleFileNameW(m, name, MAX_PATH);
+      const wchar_t* base = wcsrchr(name, L'\\');
+      char line[160];
+      snprintf(line, sizeof(line), " %ls %llu (fed %llu);", base ? base + 1 : name, c.calls.load(), c.fed.load());
+      callers += line;
+    }
+    Log("pointer: cursor read by%s", callers.c_str());
   }
   std::lock_guard lock(g_mutex);
   g_state = st;

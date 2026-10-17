@@ -53,6 +53,7 @@ struct HudLook {
   // A top-right block of the HUD (fractions of the image) drawn shifted left by sideShift (fraction of width).
   float sideWidth = 0, sideHeight = 0, sideShift = 0;
   bool sideOutline = false;
+  bool keyBlack = false;  // opacity from brightness only (ignores the game's alpha): black is see-through
 };
 bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look);
 

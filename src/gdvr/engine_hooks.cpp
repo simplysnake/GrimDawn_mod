@@ -373,6 +373,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   {
     const float* t = g_cameraTarget(self);
     const bool haveTarget = t[kTargetPos] != 0 || t[kTargetPos + 1] != 0 || t[kTargetPos + 2] != 0;
+    xr::SetInWorld(haveTarget);
     pointer::Update(origin, right, up, fwd, s.worldScale, Read3(t, kTargetPos), haveTarget, gameView);
   }
 
