@@ -46,7 +46,9 @@ Log: `%LOCALAPPDATA%\gdvr\gdvr.log` (and `launcher.log`).
 | `src/injector/main.cpp` | Injector / hot reloader (development) |
 | `src/launcher/main.cpp` | Launcher: finds the game, installs the stand-in, options swap, starts it |
 | `src/proxy/dinput8.cpp` | `dinput8.dll` stand-in that loads the mod when the launcher starts the game |
-| `tools/package.ps1` | Release build + package |
+| `tools/package.ps1` | Release build + package (zip, and the installer if Inno Setup 6 is installed) |
+| `installer/GrimDawnVR.iss` | Installer: per-user install, Steam entry, optional Defender exclusions, uninstaller |
+| `src/launcher/steam_shortcut.cpp` | Adds/removes the Steam entry (Steam's binary shortcuts.vdf) |
 | `docs/INSTALL.md` | Player guide (the README of a release) |
 | `tools/pe_dump.py` | Dumps a DLL's exports and imports |
 | `notes/` | Findings (export dumps: `tools/pe_dump.py <dll> --exports notes/exports_<Module>.txt`, not in git) |

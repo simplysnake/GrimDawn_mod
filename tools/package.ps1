@@ -45,3 +45,14 @@ if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path $out -DestinationPath $zip
 Write-Output "Release: $out"
 Write-Output "Zip:     $zip"
+
+# Installer (Inno Setup 6: winget install JRSoftware.InnoSetup)
+$iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+          "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($iscc) {
+  & $iscc /Q "/DAppVersion=$version" "/DSourceDir=$out" "/DOutputDir=$dist" (Join-Path $repo "installer\GrimDawnVR.iss") | Out-Host
+  if ($LASTEXITCODE) { throw "installer build failed" }
+  Write-Output "Setup:   $(Join-Path $dist "GrimDawnVR-Setup-$version.exe")"
+} else {
+  Write-Output "Inno Setup not found: no installer built (winget install JRSoftware.InnoSetup)"
+}

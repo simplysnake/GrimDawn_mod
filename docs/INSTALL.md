@@ -14,12 +14,20 @@ Not affiliated with or endorsed by Crate Entertainment. Free for non-commercial 
 
 ## Install
 
-1. Unzip this folder anywhere, for example `C:\Games\GrimDawnVR`.
-2. In Steam: **Games > Add a Non-Steam Game to My Library > Browse**, pick `gdvr_launch.exe`, add it.
-   Rename the entry to "Grim Dawn VR" if you like.
-3. In that entry's **Properties > Controller**, set Steam Input to **Disabled**. (Otherwise Steam turns the
-   VR controllers into a desktop gamepad and keyboard on top of the mod, and buttons misfire.)
-4. Start "Grim Dawn VR" from Steam. The first start takes a little longer.
+**With the installer** (`GrimDawnVR-Setup-<version>.exe`, recommended):
+
+1. Run it. No administrator rights are needed; it installs to `%LOCALAPPDATA%\Programs\GrimDawnVR` unless
+   you pick another folder.
+2. Leave **Add "Grim Dawn VR" to my Steam library** ticked. Steam has to be closed for that step; the
+   installer offers to close it for you. The entry shows up with your VR games.
+3. Optional: **Add Windows Defender exclusions** (asks for administrator permission; see below).
+4. In Steam, open the Properties of **Grim Dawn VR**, **Controller**, and set Steam Input to **Disabled**.
+   (Otherwise Steam turns the VR controllers into a desktop gamepad and keyboard on top of the mod, and
+   buttons misfire.)
+5. Start "Grim Dawn VR" from Steam. The first start takes a little longer.
+
+**From the zip** instead: unzip the folder anywhere, then in Steam **Games > Add a Non-Steam Game to My
+Library > Browse**, pick `gdvr_launch.exe`, and do step 4 above.
 
 ### What the launcher does
 
@@ -64,6 +72,13 @@ your own, put `backdrop.png` or `backdrop.jpg` in `%LOCALAPPDATA%\gdvr\sky`. The
 are drawn from your game's own files and light up as you complete them.
 
 ## Uninstall
+
+Installed with the installer: Windows **Settings > Apps > Grim Dawn VR > Uninstall**. It removes the
+`dinput8.dll` from the game folder, puts your normal game settings back, removes the Steam entry (close Steam
+when it asks), removes the Defender exclusions if the installer added them, and asks whether to keep your
+mod settings and save backups.
+
+From the zip, by hand:
 
 1. Delete `dinput8.dll` from the game's `x64` folder
    (`...\steamapps\common\Grim Dawn\x64`).
