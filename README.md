@@ -1,29 +1,40 @@
-# Grim Dawn VR — proof of concept
+# Grim Dawn VR
 
-Stereo VR for Grim Dawn: a camera that follows your head and the game rendered once per eye.
-This is week 1 of the proof of concept: an in-game debug overlay that hooks the engine's
-renderer and shows the live camera.
+True-stereo VR for Grim Dawn: the game rendered once per eye from a camera that follows your head, the
+HUD on a floating panel, the VR controllers as a laser pointer, mouse and keyboard, 3D damage numbers and
+item names, and the Devotion constellations as a sky dome.
+
+Unofficial; not affiliated with Crate Entertainment. Source available under the
+[PolyForm Noncommercial License 1.0.0](LICENSE.md): free to use, change and share for non-commercial
+purposes. Players: see [docs/INSTALL.md](docs/INSTALL.md) (it is the README of every release).
 
 ## Build
 
 Needs Visual Studio 2022 or newer with the **Desktop development with C++** workload
-(it includes CMake). Dependencies (MinHook, Dear ImGui) are downloaded by CMake.
+(it includes CMake). Dependencies (MinHook, Dear ImGui, OpenXR SDK) are downloaded by CMake.
 
 ```
 cmake -S . -B build -A x64
 cmake --build build --config RelWithDebInfo
 ```
 
-Output: `bin/gdvr.dll` and `bin/gdvr_inject.exe`.
+This is the development build, in `bin/`: it also logs to `logs/gdvr.log` in the repo and keeps
+diagnostics. A release (`dist/GrimDawnVR-<version>/` and a zip) comes from
+
+```
+powershell -ExecutionPolicy Bypass -File tools\package.ps1
+```
 
 ## Run
 
-1. Start Grim Dawn from Steam (64-bit). Load a character in **single player, offline**. Back up `Documents\My Games\Grim Dawn\save` first.
-2. Run `bin\gdvr_inject.exe`. The debug window appears; **F8** shows/hides it.
-3. After rebuilding, run `gdvr_inject.exe` again: it unloads the old copy and loads the new one (hot reload).
-   `gdvr_inject.exe --eject` unloads only.
+`bin\gdvr_launch.exe` (add it to Steam as a non-Steam game, Steam Input disabled for it). It finds the
+game through Steam, puts the `dinput8.dll` stand-in in the game's `x64` folder (dormant unless the
+launcher starts the game), backs up the saves, swaps in the VR copy of the game's `options.txt`
+(`options_vr.txt`; the normal one is put back on exit), starts SteamVR and the game. The mod runs from a
+copy in `%LOCALAPPDATA%\gdvr\run`, so it can be rebuilt while the game runs; `bin\gdvr_inject.exe` then
+swaps the new build into the running game (hot reload, `--eject` unloads).
 
-Log: `%LOCALAPPDATA%\gdvr\gdvr.log`
+Log: `%LOCALAPPDATA%\gdvr\gdvr.log` (and `launcher.log`).
 
 ## Layout
 
@@ -32,13 +43,16 @@ Log: `%LOCALAPPDATA%\gdvr\gdvr.log`
 | `src/gdvr/engine_api.h` | Engine exports we use (mangled names + signatures) |
 | `src/gdvr/engine_hooks.cpp` | Hook on `GraphicsMTRenderer::Render`, camera readout, experiments |
 | `src/gdvr/overlay.cpp` | `IDXGISwapChain::Present` hook + ImGui |
-| `src/injector/main.cpp` | Injector / hot reloader |
+| `src/injector/main.cpp` | Injector / hot reloader (development) |
+| `src/launcher/main.cpp` | Launcher: finds the game, installs the stand-in, options swap, starts it |
+| `src/proxy/dinput8.cpp` | `dinput8.dll` stand-in that loads the mod when the launcher starts the game |
+| `tools/package.ps1` | Release build + package |
+| `docs/INSTALL.md` | Player guide (the README of a release) |
 | `tools/pe_dump.py` | Dumps a DLL's exports and imports |
-| `notes/` | Findings and export dumps |
+| `notes/` | Findings (export dumps: `tools/pe_dump.py <dll> --exports notes/exports_<Module>.txt`, not in git) |
 
 ## VR
 
-- Launch with `bin\gdvr_launch.exe` (or the Steam shortcut). It starts SteamVR first, then the game, then the mod.
 - Hotkeys: **F9** VR mode (Off → Screen → Stereo), **F10** recentre (or click both sticks), **F8** debug window,
   **F7** fade mask (on → distance rings → off), **F11** save both eye images to `%LOCALAPPDATA%\gdvr\eyeN.bmp`.
 - Settings: `%LOCALAPPDATA%\gdvr\control.ini`, section `[vr]`: `mode`, `world_scale`, `fov_deg` (0 = fit lenses),
@@ -65,4 +79,4 @@ Log: `%LOCALAPPDATA%\gdvr\gdvr.log`
   SteamVR's *Reset View* also recentres.
 - While VR is on the game keeps running when its window is unfocused (SteamVR dashboard, other windows);
   keyboard and mouse still only reach the game when it is focused. `keep_running_unfocused=0` disables this.
-- The game must run windowed with vsync off: `tools\apply_vr_settings.ps1` applies recommended settings after the game exits.
+- The game must run windowed with vsync off: the launcher's VR copy of the game's settings (`options_vr.txt`) has that.

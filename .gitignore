@@ -3,4 +3,6 @@ bin/
 __pycache__/
 logs/
 sky/
-skybox/
+build-release/
+dist/
+notes/exports_*.txt

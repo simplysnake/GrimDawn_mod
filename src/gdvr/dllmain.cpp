@@ -22,7 +22,7 @@ HANDLE g_initThread = nullptr;
 std::atomic<bool> g_stopping{false};
 
 DWORD WINAPI InitThread(LPVOID) {
-  gdvr::Log("gdvr loading");
+  gdvr::Log("gdvr " GDVR_VERSION " loading");
   if (MH_Initialize() != MH_OK) {
     gdvr::Log("MH_Initialize failed");
     return 1;

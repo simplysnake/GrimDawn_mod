@@ -828,7 +828,7 @@ int InFlight() { return g_inFlight.load(); }
 void DrawDebugUI() {
   const float scale = ImGui::GetIO().FontGlobalScale;
   ImGui::SetNextWindowSize(ImVec2(520 * scale, 640 * scale), ImGuiCond_FirstUseEver);
-  ImGui::Begin("Grim Dawn VR  (F8 hide)");
+  ImGui::Begin("Grim Dawn VR " GDVR_VERSION "  (F8 hide)###gdvr");
   xr::DrawDebugUI();
   if (ImGui::CollapsingHeader("Diagnostics")) {
     xr::DrawDiagnostics();

@@ -1,4 +1,5 @@
-"""Maps module RVAs to the nearest preceding exported symbol (from notes/exports_<Module>.txt).
+"""Maps module RVAs to the nearest preceding exported symbol (from notes/exports_<Module>.txt, made with
+   tools/pe_dump.py <game folder>/x64/<Module>.dll --exports notes/exports_<Module>.txt; not in git).
 
 Usage: python rva_lookup.py Engine 0x112FA5 0x113342 ...
 """

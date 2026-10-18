@@ -16,6 +16,7 @@
 #include "d3dtrace.h"
 #include "devotion.h"
 #include "log.h"
+#include "paths.h"
 #include "pointer.h"
 #include "xr.h"
 
@@ -154,9 +155,9 @@ void LoadAll(ID3D11Device* device) {
     status += "constellations " + std::to_string(w) + "x" + std::to_string(h);
   else
     status += "no constellations captured";
-  // The backdrop: sky/backdrop.*, otherwise the first image in a "skybox" folder next to it.
+  // The backdrop: the user's own sky/backdrop.*, otherwise the first image in the mod's skybox folder.
   std::vector<std::wstring> candidates = {dir + L"/backdrop.png", dir + L"/backdrop.jpg", dir + L"/backdrop.jpeg"};
-  const std::wstring skyboxDir = dir.substr(0, dir.find_last_of(L"/\\")) + L"/skybox";
+  const std::wstring skyboxDir = paths::InstallDir() + L"/skybox";
   for (const wchar_t* pattern : {L"/*.png", L"/*.jpg", L"/*.jpeg"}) {
     WIN32_FIND_DATAW fd;
     HANDLE find = FindFirstFileW((skyboxDir + pattern).c_str(), &fd);
