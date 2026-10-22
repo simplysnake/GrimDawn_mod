@@ -25,6 +25,7 @@
 #include "sky.h"
 #include "perf.h"
 #include "log.h"
+#include "mirror.h"
 
 namespace gdvr::xr {
 
@@ -80,6 +81,8 @@ float g_eyeTan[2][2] = {};
 uint64_t g_framesSubmitted = 0;
 double g_lastWaitMs = 0;
 std::atomic<bool> g_inWorld{true};  // false on the title screen (no character to follow)
+float g_titleRect[4] = {};          // title screen: the character picture in the menu layer (under g_mutex)
+bool g_titleRectValid = false;
 std::atomic<int> g_dumpEyes{0};  // F11: bit per eye still to dump
 
 double NowMs() { return double(GetTickCount64()); }
@@ -339,6 +342,17 @@ mask::HudLook CurrentHudLook() {
   look.haloRadius = mix(g_settings.hudHaloRadius, g_settings.hudHaloRadiusDay, g_hudDayAmount);
   look.alphaBoost = g_settings.hudAlphaBoost;
   look.keyBlack = !g_inWorld;  // title screen: its menu layer is opaque black around the buttons
+  if (!g_inWorld) look.halo = 0;  // ...and no dark backing (it showed as a gradient around the character)
+  // Title screen: the character picture stands in the scene (engine_hooks) instead of on the panel.
+  float rect[4];
+  if (!g_inWorld && g_settings.titleCutout && mask::TitleCharacterRect(rect)) {
+    for (int k = 0; k < 4; ++k) g_titleRect[k] = g_titleRectValid ? g_titleRect[k] + (rect[k] - g_titleRect[k]) * 0.15f : rect[k];
+    g_titleRectValid = true;
+  } else if (g_inWorld || !g_settings.titleCutout) {
+    g_titleRectValid = false;
+  }
+  if (g_titleRectValid)
+    for (int k = 0; k < 4; ++k) look.cut[k] = g_titleRect[k];
   // A menu (inventory, options, map...) covers much of the HUD image: put the block back while it's open.
   // Small menus (the Esc game menu) cover too little, but they pause the game: count that too.
   static const auto isPaused = [] {
@@ -385,6 +399,13 @@ bool SaveSettingsLocked() {
   put(L"recompute_frustum", s.recomputeFrustum);
   put(L"far_plane", s.farPlane);
   put(L"camera_pull", s.cameraPull);
+  put(L"contact_shadows_on", s.contactShadowsOn);
+  put(L"contact_shadows", s.contactShadows);
+  put(L"contact_softness", s.contactSoftness);
+  put(L"contact_size", s.contactSize);
+  put(L"title_cutout", s.titleCutout);
+  put(L"mirror", s.mirror);
+  put(L"mirror_fov", s.mirrorFovDeg);
   put(L"sky", s.sky);
   put(L"sky_source", s.skySource);
   put(L"sky_dome_horizon", s.skyDomeHorizonDeg);
@@ -490,6 +511,7 @@ void EndFrame() {
       layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&proj));
 
       // HUD: the game drew only its UI onto the cleared back buffer; show it on a floating panel.
+      bool hudShown = false;
       if (g_settings.hud && g_hudPrepared) {
         sky::OnHudFrame(g_gameSwapChain);  // Devotion screen capture (UI layer, before the HUD pass)
         DrawCredit();
@@ -513,7 +535,14 @@ void EndFrame() {
           hudQuad.size = {g_settings.hudWidth,
                           g_settings.hudWidth * float(g_hudChain.height) / float(std::max(1u, g_hudChain.width))};
           layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&hudQuad));
+          hudShown = true;
         }
+      }
+      // Desktop mirror: the window shows the left eye with the HUD over it (the headset already has both).
+      ID3D11Texture2D* bb = nullptr;
+      if (g_settings.mirror && SUCCEEDED(g_gameSwapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) {
+        mirror::Compose(g_device, g_context, bb, g_eyeTan[0][0], g_eyeTan[0][1], g_settings.mirrorFovDeg, hudShown);
+        bb->Release();
       }
     } else if (g_settings.mode != Mode::Off && (sky::OnHudFrame(g_gameSwapChain), CaptureBackBuffer(g_screenChain))) {
       // Screen mode, or stereo with nothing rendered this frame (menus, loading): flat screen.
@@ -829,6 +858,7 @@ void PrepareHud() {
   if (g_bbRtv) {
     const float transparent[4] = {0, 0, 0, 0};
     g_context->ClearRenderTargetView(g_bbRtv, transparent);
+    if (!g_inWorld) mask::ClearSceneDepth(g_context);  // title screen: nothing in the eyes' scene hides the character picture
     g_hudPrepared = true;
   }
   bb->Release();
@@ -844,6 +874,13 @@ void CaptureEye(int eye, float tanHalfX, float tanHalfY) {
   }
   if (eye == 0 && g_settings.hudDayAdapt) mask::MeasureBrightness(g_gameSwapChain);
   g_eyeCaptured[eye] = CaptureBackBuffer(g_eyeChains[eye]);
+  if (eye == 0 && g_settings.mirror && g_gameSwapChain) {
+    ID3D11Texture2D* bb = nullptr;
+    if (SUCCEEDED(g_gameSwapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) {
+      mirror::KeepEye(g_device, g_context, bb);
+      bb->Release();
+    }
+  }
   g_eyeTan[eye][0] = tanHalfX;
   g_eyeTan[eye][1] = tanHalfY;
 }
@@ -854,6 +891,13 @@ void RequestEyeDump() { g_dumpEyes = 7; }
 
 void SetInWorld(bool inWorld) { g_inWorld = inWorld; }
 
+bool TitleCutout(float rect[4]) {
+  std::lock_guard lock(g_mutex);
+  if (!g_titleRectValid || g_inWorld) return false;
+  for (int k = 0; k < 4; ++k) rect[k] = g_titleRect[k];
+  return true;
+}
+
 void Shutdown() {
   std::lock_guard lock(g_mutex);
   if (g_session && g_frameBegun) {
@@ -863,6 +907,7 @@ void Shutdown() {
     xrEndFrame(g_session, &ei);
   }
   DestroyAll();
+  mirror::Shutdown();
   if (g_bbRtv) g_bbRtv->Release();
   g_bbRtv = nullptr;
   g_bbRtvTex = nullptr;
@@ -980,12 +1025,22 @@ void DrawDebugUI() {
     ImGui::SliderFloat("Backdrop brightness", &g_settings.skyBackdropBrightness, 0.0f, 2.0f, "%.2f");
   }
 
+  if (ImGui::CollapsingHeader("Desktop mirror (recording)")) {
+    ImGui::Checkbox("Show the headset view in the game window (left eye + HUD)", &g_settings.mirror);
+    ImGui::Checkbox("Title screen: character stands in the scene", &g_settings.titleCutout);
+    ImGui::SliderFloat("Mirror field of view (deg)", &g_settings.mirrorFovDeg, 50.0f, 120.0f, "%.0f");
+  }
+
   if (ImGui::CollapsingHeader("World")) {
     ImGui::SliderFloat("World scale", &g_settings.worldScale, 4.0f, 40.0f, "%.1f");
     ImGui::SliderFloat("Camera closer (units)", &g_settings.cameraPull, 0.0f, 20.0f, "%.1f");
     ImGui::Checkbox("Fade mask", &g_settings.maskEnabled);
     ImGui::SliderFloat("Fade starts (units)", &g_settings.maskInner, 10.0f, 80.0f, "%.0f");
     ImGui::SliderFloat("Fully dark at (units)", &g_settings.maskOuter, 15.0f, 90.0f, "%.0f");
+    ImGui::Checkbox("Contact shadows", &g_settings.contactShadowsOn);
+    ImGui::SliderFloat("Contact shadow strength", &g_settings.contactShadows, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Contact shadow size (units)", &g_settings.contactSize, 0.2f, 4.0f, "%.1f");
+    ImGui::SliderFloat("Contact shadow softness", &g_settings.contactSoftness, 0.0f, 3.5f, "%.1f");
   }
 
   ImGui::Separator();

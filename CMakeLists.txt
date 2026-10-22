@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(gdvr VERSION 0.1.0 LANGUAGES C CXX)
+project(gdvr VERSION 0.3.0 LANGUAGES C CXX)
 
 # Development builds (default) log into the repo and keep the diagnostics; release builds (package.ps1)
 # use only the install folder and %LOCALAPPDATA%\gdvr.
@@ -66,6 +66,7 @@ add_library(gdvr SHARED
   src/gdvr/labels.cpp
   src/gdvr/log.cpp
   src/gdvr/mask.cpp
+  src/gdvr/mirror.cpp
   src/gdvr/numbers.cpp
   src/gdvr/perf.cpp
   src/gdvr/sky.cpp
@@ -89,8 +90,8 @@ target_link_libraries(gdvr_inject PRIVATE gdvr_common)
 
 # Launcher for the Steam shortcut: installs the dinput8.dll stand-in, backs up saves, swaps in the VR
 # options, starts SteamVR and the game (no console window, no injection)
-add_executable(gdvr_launch WIN32 src/launcher/main.cpp src/launcher/steam_shortcut.cpp)
-target_link_libraries(gdvr_launch PRIVATE shell32 ole32)
+add_executable(gdvr_launch WIN32 src/launcher/main.cpp src/launcher/steam_shortcut.cpp src/launcher/update.cpp)
+target_link_libraries(gdvr_launch PRIVATE shell32 ole32 winhttp bcrypt)
 target_compile_definitions(gdvr_launch PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE GDVR_VERSION_W=L"${PROJECT_VERSION}")
 if(GDVR_DEV)
   file(WRITE ${CMAKE_BINARY_DIR}/generated/gdvr_config.h.in "#pragma once\n#define GDVR_GAME_DIR L\"@GDVR_GAME_DIR@\"\n")

@@ -324,6 +324,42 @@ struct ReplayRange {
 std::vector<ReplayRange> g_replayExtra;
 uint8_t g_replayExtraBytes[256];
 
+// Whether the game has a player character (false on the title screen, even when the camera still holds
+// the last game's position after quitting to it).
+bool HavePlayer() {
+  static void** engine = nullptr;
+  static void* (*getMainPlayer)(void*) = nullptr;
+  static bool resolved = false;
+  if (!resolved) {
+    resolved = true;
+    if (HMODULE game = GetModuleHandleW(L"Game.dll")) {
+      engine = reinterpret_cast<void**>(GetProcAddress(game, "?gGameEngine@GAME@@3PEAVGameEngine@1@EA"));
+      getMainPlayer = reinterpret_cast<void* (*)(void*)>(
+          GetProcAddress(game, "?GetMainPlayer@GameEngine@GAME@@QEBAPEAVPlayer@2@XZ"));
+    }
+    Log("title screen detection: %s", engine && getMainPlayer ? "player check" : "camera only (GetMainPlayer not found)");
+  }
+  if (!engine || !getMainPlayer) return true;
+  __try {
+    return *engine && getMainPlayer(*engine) != nullptr;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return true;
+  }
+}
+
+// Title screen: where the character picture's feet meet the menu scene's ground (game space).
+// The menu puts the character on the same spot of its scene (the stone circle), at the same place in the game's
+// view, however it frames the picture (full body, or zoomed in to the waist). That spot's depth is found once
+// per visit to the title screen, along the game camera's ray to it (independent of where the head is): each
+// frame a guess on that ray is looked up in eye 0's depth and moved to where the scene surface is; once it
+// stops moving it is kept. The picture is then shown at that depth (TitleCard below).
+constexpr float kTitleSpotU = 0.5f, kTitleSpotV = 0.78f;  // where the character's feet are in the game's view
+Vec3 g_titleAnchor;
+bool g_titleAnchorValid = false;
+float g_titleT = 30;          // distance from the game camera along the ray to the spot
+int g_titleSteady = 0;        // frames the guess has barely moved (30: found, kept)
+bool g_lastInWorld = true;
+
 // Renders the scene once per eye: the game camera is replaced by the eye's camera
 // (game camera + head pose), the result is captured for the headset, and the camera is restored.
 void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Region* region,
@@ -359,7 +395,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     const Vec3 toTarget = target - origin;
     const float dist = std::sqrt(Dot(toTarget, toTarget));
     const bool haveTarget = t[kTargetPos] != 0 || t[kTargetPos + 1] != 0 || t[kTargetPos + 2] != 0;
-    if (s.cameraPull > 0 && haveTarget && dist > 1e-3f)
+    if (s.cameraPull > 0 && haveTarget && dist > 1e-3f && HavePlayer())  // not on the title screen
       origin = origin + toTarget * (std::min(s.cameraPull, std::max(0.0f, dist - 4.0f)) / dist);
   }
   if (s.levelHorizon) {
@@ -373,8 +409,25 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   {
     const float* t = g_cameraTarget(self);
     const bool haveTarget = t[kTargetPos] != 0 || t[kTargetPos + 1] != 0 || t[kTargetPos + 2] != 0;
-    xr::SetInWorld(haveTarget);
+    const bool inWorld = haveTarget && HavePlayer();
+    if (inWorld != g_lastInWorld) Log("%s", inWorld ? "in the world" : "title screen");
+    g_lastInWorld = inWorld;
+    xr::SetInWorld(inWorld);
     pointer::Update(origin, right, up, fwd, s.worldScale, Read3(t, kTargetPos), haveTarget, gameView);
+  }
+
+  // Title screen: the character picture's feet, as a direction from the game's own camera (the flat view
+  // the game composed it for), found on the scene's ground through eye 0's depth below.
+  float titleRect[4];
+  const bool title = xr::TitleCutout(titleRect) && !g_lastInWorld;
+  Vec3 feetDir;
+  if (title) {
+    feetDir = gameView.forward + gameView.right * ((kTitleSpotU * 2 - 1) * gameView.tanX) +
+              gameView.up * ((1 - kTitleSpotV * 2) * gameView.tanY);
+  } else {
+    g_titleAnchorValid = false;
+    g_titleSteady = 0;
+    g_titleT = 30;
   }
 
   // Frustum objects are built in place by the engine (size unknown, so over-allocate).
@@ -449,7 +502,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     // No camera target (main menu, character select): nothing to centre the fade on.
     const float* target = g_cameraTarget(self);
     const bool haveTarget = target[kTargetPos] != 0 || target[kTargetPos + 1] != 0 || target[kTargetPos + 2] != 0;
-    if (s.maskEnabled && haveTarget) {
+    if (s.maskEnabled && haveTarget && HavePlayer()) {  // not on the title screen (stale camera target)
       mask::Params mp;
       mp.right = toWorld(XrToCamera(Rotate(p.orientation, {1, 0, 0})));
       mp.up = Read3(eyeCoords, kUp);
@@ -465,6 +518,10 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
       mp.depthStart = s.maskDepthStart;
       mp.strength = s.maskStrength;
       mp.debug = s.maskDebug;
+      mp.eye = eye;
+      mp.contactStrength = s.contactShadowsOn ? s.contactShadows : 0.0f;
+      mp.contactSoftness = s.contactSoftness;
+      mp.contactSize = s.contactSize;
       if (s.sky) {
         const sky::Layers layers = sky::Get(xr::GameSwapChain());
         mp.skyConstellations = layers.constellations;
@@ -503,6 +560,44 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
       labels::DrawEye(ev);
       numbers::DrawEye(ev);
       pointer::DrawEye(ev);
+
+      if (title) {
+        const Vec3 ray = Normalize(feetDir);
+        if (eye == 0 && g_titleSteady < 30) {
+          // The current guess on the feet ray, as seen by this eye; the scene depth there (a frame late).
+          const Vec3 guess = gameView.origin + ray * g_titleT - ev.origin;
+          const float gz = Dot(guess, ev.forward);
+          if (gz > 0) {
+            const float sx = Dot(guess, ev.right) / (gz * ev.tanX), sy = Dot(guess, ev.up) / (gz * ev.tanY);
+            mask::ProbeDepth((sx * 0.5f + 0.5f) * ev.width, (0.5f - sy * 0.5f) * ev.height);
+            const float d = mask::ProbedDepth(), n = g_getNear(camera), f = g_getFar(camera);
+            if (d > 0 && d < 0.99999f) {
+              const float z = n * f / (f - d * (f - n));
+              const Vec3 surface = ev.origin + (ev.forward + ev.right * (sx * ev.tanX) + ev.up * (sy * ev.tanY)) * z;
+              const float t = std::clamp(Dot(surface - gameView.origin, ray), 1.0f, 500.0f);
+              g_titleSteady = std::fabs(t - g_titleT) < 0.05f ? g_titleSteady + 1 : 0;
+              g_titleT += (t - g_titleT) * 0.5f;
+              g_titleAnchor = gameView.origin + ray * g_titleT;
+              g_titleAnchorValid = true;
+              if (g_titleSteady == 30) Log("title screen: the character's spot is %.1f units from the game camera", g_titleT);
+            }
+          }
+        }
+        if (g_titleAnchorValid) {
+          // The picture as a card at the spot's depth, facing the game's camera and covering exactly the
+          // area the game drew it in (as seen from the game's camera): zooming or animation change the
+          // picture, never where the card stands.
+          const float depth = Dot(g_titleAnchor - gameView.origin, gameView.forward);
+          auto at = [&](float u, float v) {
+            return gameView.origin + (gameView.forward + gameView.right * ((u * 2 - 1) * gameView.tanX) +
+                                      gameView.up * ((1 - v * 2) * gameView.tanY)) * depth;
+          };
+          const Vec3 corners[4] = {at(titleRect[0], titleRect[3]), at(titleRect[2], titleRect[3]),
+                                   at(titleRect[2], titleRect[1]), at(titleRect[0], titleRect[1])};
+          mask::EyeCam cam{ev.origin, ev.right, ev.up, ev.forward, ev.tanX, ev.tanY, ev.nearPlane};
+          mask::DrawCutout(xr::GameSwapChain(), cam, corners, titleRect);
+        }
+      }
     }
     xr::CaptureEye(eye, tanX, tanY);
     perf::Mark(pass == 0 ? perf::kEye0End : perf::kEye1End);
@@ -689,6 +784,13 @@ void PollControlFile() {
   vr.labelsInWorld = getInt(L"labels_in_world", vr.labelsInWorld) != 0;
   vr.damageNumbers3d = getInt(L"damage_numbers_3d", vr.damageNumbers3d) != 0;
   vr.cameraPull = getFloat(L"camera_pull", vr.cameraPull);
+  vr.contactShadowsOn = getInt(L"contact_shadows_on", vr.contactShadowsOn) != 0;
+  vr.contactShadows = getFloat(L"contact_shadows", vr.contactShadows);
+  vr.contactSoftness = std::clamp(getFloat(L"contact_softness", vr.contactSoftness), 0.0f, 3.5f);
+  vr.contactSize = getFloat(L"contact_size", vr.contactSize);
+  vr.titleCutout = getInt(L"title_cutout", vr.titleCutout) != 0;
+  vr.mirror = getInt(L"mirror", vr.mirror) != 0;
+  vr.mirrorFovDeg = getFloat(L"mirror_fov", vr.mirrorFovDeg);
   vr.sky = getInt(L"sky", vr.sky) != 0;
   vr.skySource = getInt(L"sky_source", vr.skySource);
   vr.skyDomeHorizonDeg = getFloat(L"sky_dome_horizon", vr.skyDomeHorizonDeg);

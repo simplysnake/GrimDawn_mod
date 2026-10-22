@@ -294,7 +294,9 @@ void Corner(const Sprite& s, int w, int h, int k, float& x, float& y) {
 std::mutex g_mutex;
 std::unique_ptr<MapData> g_data;  // set by the loader thread
 std::atomic<bool> g_started{false}, g_loaded{false}, g_failed{false};
-std::thread g_loader;  // joined on shutdown (no thread left running in an unloaded DLL)
+// Joined in Shutdown (no thread left running in an unloaded DLL). A pointer, never destroyed at process exit:
+// a joinable std::thread destroyed there makes the C++ runtime abort the game as it quits.
+std::thread* g_loader = nullptr;
 std::string g_status = "not started";
 ID3D11Texture2D* g_mapTex = nullptr;
 ID3D11ShaderResourceView* g_mapSrv = nullptr;
@@ -855,7 +857,7 @@ void Start() {
   if (g_started.exchange(true)) return;
   SetStatus("loading the devotion map from the game files...");
   ResolveGameApi();
-  g_loader = std::thread(LoadGuarded);
+  g_loader = new std::thread(LoadGuarded);
 }
 
 void SetLook(float incompleteBrightness, float glow) {
@@ -921,7 +923,9 @@ std::string Status() {
 }
 
 void Shutdown() {
-  if (g_loader.joinable()) g_loader.join();
+  if (g_loader && g_loader->joinable()) g_loader->join();
+  delete g_loader;
+  g_loader = nullptr;
   ReleaseGpu();
   g_map.reset();
 }

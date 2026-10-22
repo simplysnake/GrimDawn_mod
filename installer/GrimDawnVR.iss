@@ -55,6 +55,8 @@ Name: "{autodesktop}\Grim Dawn VR"; Filename: "{app}\gdvr_launch.exe"; WorkingDi
 
 [Run]
 Filename: "{app}\README.md"; Description: "Open the README (controls, settings, troubleshooting)"; Flags: postinstall shellexec skipifsilent unchecked
+; Updates started by the launcher (/RELAUNCH=1): start the game again when done
+Filename: "{app}\gdvr_launch.exe"; WorkingDir: "{app}"; Flags: nowait; Check: Relaunch
 
 [Messages]
 FinishedLabel=Grim Dawn VR is installed. Start it from Steam ("Grim Dawn VR") or the Start menu.%n%nImportant: in Steam, open the Properties of "Grim Dawn VR", Controller, and set Steam Input to Disabled. Otherwise Steam turns the VR controllers into a desktop gamepad on top of the mod.
@@ -62,6 +64,11 @@ FinishedLabel=Grim Dawn VR is installed. Start it from Steam ("Grim Dawn VR") or
 [Code]
 const
   SteamExe = 'steam.exe';
+
+function Relaunch(): Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
 
 function SteamRunning(): Boolean;
 var

@@ -26,6 +26,10 @@ struct Params {
   float bandLow = 0.03f, bandHigh = 0.96f;  // elevations, radians
   float crop[4] = {0, 0, 1, 1};
   float key = 0.1f, soft = 0.15f, brightness = 1.2f, opacity = 1.0f, backdropBrightness = 1.0f;
+  int eye = 0;                  // which eye (each keeps its own contact-shadow history)
+  float contactStrength = 0;   // contact shadows (darkening where things meet the ground), 0 = off
+  float contactSoftness = 1.5f;  // ...their blur (mip level of the half-size occlusion: +1 = twice as wide)
+  float contactSize = 1.0f;      // ...how far around a point geometry counts (game units)
   bool dome = false;           // constellations = devotion map as a dome overhead (its own alpha)
   float domeHorizon = -0.09f;  // the map's rim elevation, radians
 };
@@ -37,6 +41,24 @@ void InstallHook(ID3D11DeviceContext* context);
 // width/height: size of the scene depth buffer; pick: -1 = last matching bind, n = n-th distinct one.
 void BeginCapture(unsigned width, unsigned height, int pick = -1);
 void EndCapture();
+
+// ---- Title screen: the character picture standing in the 3D menu scene --------------------------------
+// The character is a flat picture in the game's menu layer; it is drawn as a card standing on the scene's
+// ground instead (and left out of the HUD panel), so it stays planted when the head moves.
+struct EyeCam {
+  Vec3 origin, right, up, forward;
+  float tanX = 1, tanY = 1, nearPlane = 0.1f;
+};
+// Where the picture is in the menu layer (fractions u0 v0 u1 v1), from the last frames' title layer.
+bool TitleCharacterRect(float rect[4]);
+// Asks for the scene depth at a pixel of the eye just rendered; the answer arrives a frame or two later.
+void ProbeDepth(float px, float py);
+float ProbedDepth();  // raw depth 0..1 (-1: none yet)
+// Clears the scene's depth buffers. The menu layer draws the character picture depth-tested against them;
+// in VR they hold the last eye's scene, which cut holes in the picture (grass and ground shaped).
+void ClearSceneDepth(ID3D11DeviceContext* ctx);
+// Draws the picture (`rect` of the last menu layer) on the quad `corners` (BL BR TR TL, game space).
+void DrawCutout(IDXGISwapChain* swapChain, const EyeCam& cam, const Vec3 corners[4], const float rect[4]);
 
 // Draws the fade over the back buffer. Returns false if no usable depth buffer was found.
 bool Apply(IDXGISwapChain* swapChain, const Params& p);
@@ -54,6 +76,7 @@ struct HudLook {
   float sideWidth = 0, sideHeight = 0, sideShift = 0;
   bool sideOutline = false;
   bool keyBlack = false;  // opacity from brightness only (ignores the game's alpha): black is see-through
+  float cut[4] = {};      // title screen: rect (fractions u0 v0 u1 v1) left out of the panel (the character)
 };
 bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look);
 

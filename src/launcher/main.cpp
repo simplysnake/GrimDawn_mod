@@ -6,6 +6,7 @@
 //   3. Swaps in the VR copy of the game's options.txt (window mode, resolution...) and puts the
 //      normal one back when the game exits, so Grim Dawn started normally keeps its own settings.
 //   4. Starts SteamVR, then the game with the mod, and waits until the game exits.
+//   Before that, at most once a day, it checks GitHub for a newer release and offers it (update.h).
 //
 //   gdvr_launch [--game-dir "<path>"]
 //
@@ -33,6 +34,7 @@
 #include <vector>
 
 #include "steam_shortcut.h"
+#include "update.h"
 
 namespace steam = gdvr::steam;
 
@@ -392,6 +394,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   g_logPath = userDir / (mode.empty() ? L"launcher.log" : L"install.log");
   if (mode.empty()) fs::remove(g_logPath, ec);
   Logf(L"Grim Dawn VR launcher %s, %s %s", GDVR_VERSION_W, home.c_str(), mode.c_str());
+  if (mode == L"--update-test")  // (test) what the update check finds on GitHub, as if this were version rest[0]
+    return gdvr::update::Probe(userDir, rest.empty() ? GDVR_VERSION_W : rest[0].c_str(), rest.size() > 1) ? 0 : 1;
   if (mode == L"--steam-roundtrip")
     return rest.size() == 2 && steam::RoundTrip(rest[0], rest[1]) ? 0 : 1;
   if (mode == L"--add-to-steam" || mode == L"--remove-from-steam") {
@@ -413,6 +417,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
   if (IsRunning(L"Grim Dawn.exe"))
     return Fail(L"Grim Dawn is already running. Close it, then start Grim Dawn VR again.");
+
+  // A newer release? (asks first; at most once a day). The installer starts the game again afterwards.
+#ifndef GDVR_DEV  // development builds are newer than any release
+  if (gdvr::update::OfferUpdate(userDir, GDVR_VERSION_W)) return 0;
+#endif
 
   std::wstring error;
   if (!InstallProxy(gameDir, home, error)) return Fail(error);

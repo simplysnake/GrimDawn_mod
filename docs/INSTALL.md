@@ -62,6 +62,29 @@ Assign skills to the hotbar the usual way: point at a hotbar slot and pull the r
 Keyboard: **F8** settings window, **F9** VR mode (off, flat screen, stereo), **F10** recentre,
 **F7** fade at the edge of the play area, **F11** save screenshots of both eyes.
 
+## Recording and streaming
+
+The game window on your monitor shows what you see in the headset: the left eye, cropped to a normal
+field of view, with the HUD over it. Record or stream that window with any tool (OBS "Game Capture" or
+"Window Capture", Steam recording, ShadowPlay...). In the **F8** window, **Desktop mirror** turns it off
+and sets its field of view.
+
+## Updates
+
+When you start Grim Dawn VR, the launcher checks for a newer release at most once a day and asks before
+doing anything: **Yes** downloads the installer from GitHub, checks it against its published SHA-256
+checksum, updates in place (your settings stay) and starts the game again; **No** plays your current
+version; **Cancel** stops asking about that version. To turn the check off, put this in
+`%LOCALAPPDATA%\gdvr\launcher.ini`:
+
+```ini
+[update]
+check=0
+```
+
+You can always update by hand: download the newest setup from the Releases page and run it over the
+installed version.
+
 ## Settings
 
 Everything is in the **F8** window (HUD distance and size, labels, sky, controls...). **Save settings**

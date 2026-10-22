@@ -33,6 +33,9 @@ bool g_capturingAllowed = true;  // false after Shutdown
 int g_pick = -1;
 int g_matchIndex = 0;  // distinct matching depth buffers seen in this capture
 ID3D11DepthStencilView* g_lastDsv = nullptr;  // not owned; only compared
+// The screen-sized depth buffers the scene renders into (owned references; the title screen clears them).
+constexpr int kMaxSceneDsvs = 4;
+ID3D11DepthStencilView* g_sceneDsvs[kMaxSceneDsvs] = {};
 ID3D11Texture2D* g_depthTex = nullptr;        // owned
 DXGI_FORMAT g_depthFormat = DXGI_FORMAT_UNKNOWN;
 
@@ -44,6 +47,81 @@ ID3D11Texture2D* g_hudCopy = nullptr;
 ID3D11ShaderResourceView* g_hudCopySrv = nullptr;
 ID3D11Buffer* g_cb = nullptr;
 ID3D11BlendState* g_blend = nullptr;
+// Contact shadows: linear depth with a full mip chain (mips = the blur), per eye.
+ID3D11PixelShader* g_linPs = nullptr;
+ID3D11Texture2D* g_linTex = nullptr;
+ID3D11RenderTargetView* g_linRtv = nullptr;
+ID3D11ShaderResourceView* g_linSrv = nullptr;
+ID3D11PixelShader* g_aoPs = nullptr;
+ID3D11Texture2D* g_aoTex = nullptr;  // half size, full mip chain
+ID3D11RenderTargetView* g_aoRtv = nullptr;
+ID3D11ShaderResourceView* g_aoSrv = nullptr;
+// Smoothed over time: the result (occlusion + depth, with mips for the blur) and each eye's copy of it.
+ID3D11PixelShader* g_temporalPs = nullptr;
+ID3D11Texture2D* g_aoOut = nullptr;
+ID3D11RenderTargetView* g_aoOutRtv = nullptr;
+ID3D11ShaderResourceView* g_aoOutSrv = nullptr;
+ID3D11Texture2D* g_aoHist[2] = {};
+ID3D11ShaderResourceView* g_aoHistSrv[2] = {};
+struct PrevView {
+  Vec3 right, up, forward, origin;
+  float tanX = 1, tanY = 1;
+  bool valid = false;
+};
+PrevView g_aoPrev[2];
+
+// A mip-mapped float render target (`w` x `h`) for the contact shadows.
+bool MakeMipTarget(UINT w, UINT h, ID3D11Texture2D*& tex, ID3D11RenderTargetView*& rtv, ID3D11ShaderResourceView*& srv,
+                   DXGI_FORMAT format = DXGI_FORMAT_R16_FLOAT) {
+  D3D11_TEXTURE2D_DESC d{};
+  d.Width = w;
+  d.Height = h;
+  d.MipLevels = 0;  // full chain
+  d.ArraySize = 1;
+  d.Format = format;
+  d.SampleDesc.Count = 1;
+  d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+  d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+  D3D11_RENDER_TARGET_VIEW_DESC rv{};
+  rv.Format = d.Format;
+  rv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+  return SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &tex)) && SUCCEEDED(g_device->CreateRenderTargetView(tex, &rv, &rtv)) &&
+         SUCCEEDED(g_device->CreateShaderResourceView(tex, nullptr, &srv));
+}
+
+void ReleaseContactTextures() {
+  for (int e = 0; e < 2; ++e) {
+    if (g_aoHistSrv[e]) g_aoHistSrv[e]->Release();
+    if (g_aoHist[e]) g_aoHist[e]->Release();
+    g_aoHistSrv[e] = nullptr;
+    g_aoHist[e] = nullptr;
+    g_aoPrev[e].valid = false;
+  }
+  if (g_aoOutSrv) g_aoOutSrv->Release();
+  if (g_aoOutRtv) g_aoOutRtv->Release();
+  if (g_aoOut) g_aoOut->Release();
+  g_aoOutSrv = nullptr;
+  g_aoOutRtv = nullptr;
+  g_aoOut = nullptr;
+}
+
+bool MakeContactTextures(UINT w, UINT h) {
+  if (!MakeMipTarget(w, h, g_aoOut, g_aoOutRtv, g_aoOutSrv, DXGI_FORMAT_R16G16_FLOAT)) return false;
+  for (int e = 0; e < 2; ++e) {
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = w;
+    d.Height = h;
+    d.MipLevels = 1;
+    d.ArraySize = 1;
+    d.Format = DXGI_FORMAT_R16G16_FLOAT;
+    d.SampleDesc.Count = 1;
+    d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(g_device->CreateTexture2D(&d, nullptr, &g_aoHist[e])) ||
+        FAILED(g_device->CreateShaderResourceView(g_aoHist[e], nullptr, &g_aoHistSrv[e])))
+      return false;
+  }
+  return true;
+}
 ID3D11SamplerState* g_sampClamp = nullptr;
 ID3D11SamplerState* g_sampWrap = nullptr;
 ID3D11DepthStencilState* g_depthState = nullptr;
@@ -78,6 +156,12 @@ cbuffer Params : register(b0) {
   float4 sky3;    // sky: x band low, y band high (rad), z brightness, w opacity
   float4 sky4;    // sky: crop of the capture (left, top, right, bottom)
   float4 sky5;    // sky: x backdrop brightness, y dome mode, z dome rim elevation (rad)
+  float4 ao;      // contact shadows: x strength (0 = off), y blur (mip level of the AO), w radius (game units)
+  float4 prevR;   // contact shadows, this eye's previous frame: right (w tanX), up (w tanY), forward,
+  float4 prevU;   // origin (w: 1 = history valid)
+  float4 prevF;
+  float4 prevO;
+  float4 hud4;    // HUD pass: title screen, the character picture's rect in px (drawn in the scene instead)
 };
 Texture2D<float4> skyConst : register(t1);
 Texture2D<float4> skyBack : register(t2);
@@ -115,6 +199,9 @@ float3 Sky(float3 dir) {
 }
 Texture2D<float> depthTex : register(t0);
 Texture2D<float4> hudTex : register(t0);
+Texture2D<float> linDepth : register(t3);  // contact shadows: view depth / far (mip 1 = half size)
+Texture2D<float> aoTex : register(t4);     // contact shadows: occlusion at half size, with mips (the blur)
+Texture2D<float2> aoHist : register(t5);   // contact shadows: this eye's previous result (x occlusion, y depth / far)
 
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
@@ -143,7 +230,90 @@ float4 PS(VSOut i) : SV_Target {
   }
   float a = smoothstep(fade.x, fade.y, dist);
   a = max(a, smoothstep(fade.z, fade.w, z));
-  return float4(voidColor, a * color.a);  // fades into the sky (or black)
+
+  // Contact shadows (PSAO), blurred: 9 taps over a mip of it (smooth, no blocky mip steps).
+  float occl = 0;
+  if (ao.x > 0) {
+    float2 dims;
+    aoTex.GetDimensions(dims.x, dims.y);
+    float2 o = exp2(ao.y) * 1.25 / dims;
+    float sum = 0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+      [unroll] for (int x = -1; x <= 1; ++x)
+        sum += aoTex.SampleLevel(sampClamp, i.uv + float2(x, y) * o, max(ao.y - 1, 0)) * ((x == 0 ? 2 : 1) * (y == 0 ? 2 : 1));
+    occl = saturate(sum / 16 * 1.6) * ao.x;
+  }
+  // The fade (towards voidColor, alpha a) and the darkening in one blend: result = scene * (1 - A) * (1 - occl)
+  // + voidColor * A.
+  float A = a * color.a;
+  float outA = A + occl - A * occl;
+  return float4(voidColor * (A / max(outA, 1e-4)), outA);
+}
+
+// Contact shadows (ambient occlusion), at half size. Each point looks at a half-sphere of `ao.w` game units
+// over its own surface: geometry inside it (a rock's side next to the ground, grass over its roots, a
+// character's feet) darkens it; anything farther away (a tree in front of a distant wall) doesn't count.
+// Uses this eye's own depth of this frame: nothing lags or slides. The same sample pattern everywhere (no
+// per-pixel noise, which shimmered as the scene moved under it); the blur smooths it.
+static const float3 kKernel[12] = {
+  float3(0.53, 0.08, 0.30), float3(-0.29, 0.44, 0.22), float3(-0.41, -0.33, 0.35), float3(0.22, -0.55, 0.18),
+  float3(0.71, 0.37, 0.41), float3(-0.66, 0.12, 0.52), float3(0.05, 0.78, 0.33), float3(0.31, -0.71, 0.47),
+  float3(-0.84, -0.41, 0.24), float3(0.92, -0.18, 0.30), float3(-0.17, -0.93, 0.28), float3(0.12, 0.21, 0.95)};
+float PSAO(VSOut i) : SV_Target {
+  float f = origin.w;
+  float zc = linDepth.SampleLevel(sampClamp, i.uv, 1);
+  if (zc >= 0.999) return 0;  // the void
+  float z = zc * f;
+  float2 ndc = float2(i.uv.x * 2 - 1, 1 - i.uv.y * 2);
+  float3 P = float3(ndc.x * right.w * z, ndc.y * up.w * z, z);  // view space: x right, y up, z forward
+  float3 N = normalize(cross(ddy(P), ddx(P)));
+  if (N.z > 0) N = -N;  // towards the camera
+  float3 T = normalize(cross(N, abs(N.y) < 0.9 ? float3(0, 1, 0) : float3(1, 0, 0)));
+  float3 T2 = T, B2 = cross(N, T);
+  float radius = ao.w, occ = 0;
+  [unroll] for (int k = 0; k < 12; ++k) {
+    float3 S = P + (T2 * kKernel[k].x + B2 * kKernel[k].y + N * kKernel[k].z) * radius;
+    if (S.z < 0.1) continue;
+    float2 sn = float2(S.x / (S.z * right.w), S.y / (S.z * up.w));
+    float sz = linDepth.SampleLevel(sampClamp, float2(sn.x * 0.5 + 0.5, 0.5 - sn.y * 0.5), 1) * f;
+    float range = saturate(radius / max(abs(z - sz), 1e-3));  // only geometry near this point counts
+    occ += (sz < S.z - 0.03 * radius ? 1.0 : 0.0) * range;
+  }
+  return occ / 12;
+}
+
+// Contact shadows, smoothing over time: each pixel finds where its world point was in this eye's previous
+// frame (head turns and moves, walking, the camera) and blends with the result there. A pixel that was
+// hidden or off-screen then (its depth doesn't match) starts fresh, so nothing smears or slides.
+float2 PSTemporal(VSOut i) : SV_Target {
+  float raw = aoTex.SampleLevel(sampClamp, i.uv, 0);
+  float f = origin.w;
+  float zc = linDepth.SampleLevel(sampClamp, i.uv, 1);
+  if (zc >= 0.999) return float2(0, 1);
+  float z = zc * f;
+  float2 ndc = float2(i.uv.x * 2 - 1, 1 - i.uv.y * 2);
+  float3 W = origin.xyz + right.xyz * (ndc.x * right.w * z) + up.xyz * (ndc.y * up.w * z) + fwd.xyz * z;
+  float result = raw;
+  if (prevO.w > 0) {
+    float3 v = W - prevO.xyz;
+    float pz = dot(v, prevF.xyz);
+    if (pz > 0.1) {
+      float2 pn = float2(dot(v, prevR.xyz) / (pz * prevR.w), dot(v, prevU.xyz) / (pz * prevU.w));
+      if (all(abs(pn) < 0.995)) {
+        float2 h = aoHist.SampleLevel(sampClamp, float2(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5), 0);
+        if (abs(h.y * f - pz) < 0.04 * pz) result = lerp(raw, h.x, 0.88);
+      }
+    }
+  }
+  return float2(result, zc);
+}
+
+// Contact shadows, first step: linear view depth (/ far; the void = 1), mip-mapped afterwards.
+float PSLinear(VSOut i) : SV_Target {
+  float d = depthTex.Load(int3(i.pos.xy, 0));
+  if (d >= 0.99999) return 1;
+  float n = fwd.w, f = origin.w;
+  return n / (f - d * (f - n));  // = view depth / far
 }
 
 // Some HUD elements don't write alpha; their colour (premultiplied over black) says how visible they are.
@@ -171,6 +341,7 @@ float4 Hud(int2 p) {
 
 float4 PSHud(VSOut i) : SV_Target {
   int2 p = int2(i.pos.xy);
+  if (hud2.w > 0 && hud4.z > hud4.x && InRect(p, hud4)) return float4(0, 0, 0, 0);
   if (hud2.z > 0) {  // outline: red where the game draws the side block, green where it is shown
     float4 moved = hud3 - float4(hud2.y, 0, hud2.y, 0);
     if (InRect(p, moved + float4(-3, -3, 3, 3)) && !InRect(p, moved + float4(3, 3, -3, -3))) return float4(0, 1, 0, 1);
@@ -198,7 +369,7 @@ float4 PSHud(VSOut i) : SV_Target {
 
 struct alignas(16) Constants {
   float right[4], up[4], fwd[4], origin[4], target[4], fade[4], color[4], hud[4], hud2[4], hud3[4];
-  float sky0[4], sky1[4], sky2[4], sky3[4], sky4[4], sky5[4];
+  float sky0[4], sky1[4], sky2[4], sky3[4], sky4[4], sky5[4], ao[4], prevR[4], prevU[4], prevF[4], prevO[4], hud4[4];
 };
 
 template <typename T>
@@ -229,6 +400,16 @@ void STDMETHODCALLTYPE HookOMSetRenderTargets(ID3D11DeviceContext* ctx, UINT n, 
     if (res && SUCCEEDED(res->QueryInterface(IID_PPV_ARGS(&tex)))) {
       D3D11_TEXTURE2D_DESC d;
       tex->GetDesc(&d);
+      if (d.Width == g_wantWidth && d.Height == g_wantHeight) {  // remember every screen-sized one
+        bool known = false;
+        for (ID3D11DepthStencilView* v : g_sceneDsvs) known |= v == dsv;
+        for (ID3D11DepthStencilView*& v : g_sceneDsvs)
+          if (!known && !v) {
+            v = dsv;
+            v->AddRef();
+            break;
+          }
+      }
       if ((d.BindFlags & D3D11_BIND_SHADER_RESOURCE) && d.SampleDesc.Count == 1 && SrvFormatFor(d.Format) &&
           d.Width == g_wantWidth && d.Height == g_wantHeight && (g_pick < 0 || g_matchIndex++ == g_pick) &&
           tex != g_depthTex) {
@@ -251,20 +432,35 @@ bool CreateResources() {
   ID3DBlob* vsBlob = nullptr;
   ID3DBlob* psBlob = nullptr;
   ID3DBlob* hudBlob = nullptr;
+  ID3DBlob* linBlob = nullptr;
+  ID3DBlob* aoBlob = nullptr;
+  ID3DBlob* tBlob = nullptr;
   ID3DBlob* errors = nullptr;
   bool ok = SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mask", nullptr, nullptr, "VS", "vs_5_0", 0, 0,
                                  &vsBlob, &errors)) &&
             SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mask", nullptr, nullptr, "PS", "ps_5_0", 0, 0,
                                  &psBlob, &errors)) &&
             SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mask", nullptr, nullptr, "PSHud", "ps_5_0", 0, 0,
-                                 &hudBlob, &errors));
+                                 &hudBlob, &errors)) &&
+            SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mask", nullptr, nullptr, "PSLinear", "ps_5_0", 0, 0,
+                                 &linBlob, &errors)) &&
+            SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mask", nullptr, nullptr, "PSAO", "ps_5_0", 0, 0,
+                                 &aoBlob, &errors)) &&
+            SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mask", nullptr, nullptr, "PSTemporal", "ps_5_0", 0,
+                                 0, &tBlob, &errors));
   if (!ok) {
     Log("mask: shader compile failed: %s", errors ? static_cast<const char*>(errors->GetBufferPointer()) : "?");
   } else {
     ok = SUCCEEDED(g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_vs)) &&
          SUCCEEDED(g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_ps)) &&
-         SUCCEEDED(g_device->CreatePixelShader(hudBlob->GetBufferPointer(), hudBlob->GetBufferSize(), nullptr, &g_hudPs));
+         SUCCEEDED(g_device->CreatePixelShader(hudBlob->GetBufferPointer(), hudBlob->GetBufferSize(), nullptr, &g_hudPs)) &&
+         SUCCEEDED(g_device->CreatePixelShader(linBlob->GetBufferPointer(), linBlob->GetBufferSize(), nullptr, &g_linPs)) &&
+         SUCCEEDED(g_device->CreatePixelShader(aoBlob->GetBufferPointer(), aoBlob->GetBufferSize(), nullptr, &g_aoPs)) &&
+         SUCCEEDED(g_device->CreatePixelShader(tBlob->GetBufferPointer(), tBlob->GetBufferSize(), nullptr, &g_temporalPs));
   }
+  SafeRelease(tBlob);
+  SafeRelease(linBlob);
+  SafeRelease(aoBlob);
   SafeRelease(vsBlob);
   SafeRelease(psBlob);
   SafeRelease(hudBlob);
@@ -308,8 +504,12 @@ struct StateBackup {
   UINT sampleMask = 0;
   ID3D11DepthStencilState* depth = nullptr;
   UINT stencilRef = 0;
-  ID3D11ShaderResourceView* psSrv = nullptr;
+  // The game binds textures once and expects them to stay: every slot the mod's passes use is put back.
+  static constexpr UINT kSrvs = 8, kSamplers = 4;
+  ID3D11ShaderResourceView* psSrvs[kSrvs] = {};
+  ID3D11SamplerState* psSamplers[kSamplers] = {};
   ID3D11Buffer* psCb = nullptr;
+  ID3D11Buffer* vsCb = nullptr;
   ID3D11PixelShader* ps = nullptr;
   ID3D11VertexShader* vs = nullptr;
   ID3D11GeometryShader* gs = nullptr;
@@ -329,8 +529,10 @@ struct StateBackup {
     c->RSGetState(&raster);
     c->OMGetBlendState(&blend, blendFactor, &sampleMask);
     c->OMGetDepthStencilState(&depth, &stencilRef);
-    c->PSGetShaderResources(0, 1, &psSrv);
+    c->PSGetShaderResources(0, kSrvs, psSrvs);
+    c->PSGetSamplers(0, kSamplers, psSamplers);
     c->PSGetConstantBuffers(0, 1, &psCb);
+    c->VSGetConstantBuffers(0, 1, &vsCb);
     c->PSGetShader(&ps, psInst, &psInstCount);
     c->VSGetShader(&vs, vsInst, &vsInstCount);
     c->GSGetShader(&gs, gsInst, &gsInstCount);
@@ -346,8 +548,10 @@ struct StateBackup {
     c->RSSetState(raster);
     c->OMSetBlendState(blend, blendFactor, sampleMask);
     c->OMSetDepthStencilState(depth, stencilRef);
-    c->PSSetShaderResources(0, 1, &psSrv);
+    c->PSSetShaderResources(0, kSrvs, psSrvs);
+    c->PSSetSamplers(0, kSamplers, psSamplers);
     c->PSSetConstantBuffers(0, 1, &psCb);
+    c->VSSetConstantBuffers(0, 1, &vsCb);
     c->PSSetShader(ps, psInst, psInstCount);
     c->VSSetShader(vs, vsInst, vsInstCount);
     c->GSSetShader(gs, gsInst, gsInstCount);
@@ -360,8 +564,10 @@ struct StateBackup {
     SafeRelease(raster);
     SafeRelease(blend);
     SafeRelease(depth);
-    SafeRelease(psSrv);
+    for (auto*& v : psSrvs) SafeRelease(v);
+    for (auto*& v : psSamplers) SafeRelease(v);
     SafeRelease(psCb);
+    SafeRelease(vsCb);
     SafeRelease(ps);
     SafeRelease(vs);
     SafeRelease(gs);
@@ -441,6 +647,7 @@ struct Meter {
   std::atomic<float> value{-1.0f};
   // Optional: read back a whole small mip level too (the HUD's alpha map for the pointer).
   int gridLevel = -1;
+  bool gridBrightness = false;  // grid cells hold max(r, g, b) instead of alpha
   ID3D11Texture2D* gridStaging = nullptr;
   bool gridPending = false;
   UINT gridW = 0, gridH = 0;
@@ -531,7 +738,9 @@ struct Meter {
           grid.resize(size_t(gridW) * gridH);
           for (UINT y = 0; y < gridH; ++y) {
             const auto* row = static_cast<const uint8_t*>(mapped.pData) + size_t(y) * mapped.RowPitch;
-            for (UINT x = 0; x < gridW; ++x) grid[size_t(y) * gridW + x] = row[x * 4 + 3];
+            for (UINT x = 0; x < gridW; ++x)
+              grid[size_t(y) * gridW + x] =
+                  gridBrightness ? std::max(row[x * 4], std::max(row[x * 4 + 1], row[x * 4 + 2])) : row[x * 4 + 3];
           }
           ctx->Unmap(gridStaging, 0);
           gridPending = false;
@@ -554,6 +763,8 @@ Meter g_sceneMeter{"brightness", [](const uint8_t* px, bool bgra) {
                    }};
 // How much of the HUD image is covered (average alpha after the HUD pass): jumps when a menu opens.
 Meter g_hudMeter{"HUD coverage", [](const uint8_t* px, bool) { return px[3] / 255.0f; }};
+// Title screen: brightness of the menu layer as the game drew it (finds the character picture).
+Meter g_titleMeter{"title layer", [](const uint8_t* px, bool) { return px[1] / 255.0f; }};
 
 void MeasureBrightness(IDXGISwapChain* swapChain) {
   if (!g_capturingAllowed || g_failed || !swapChain) return;
@@ -617,6 +828,11 @@ bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look) {
     ID3D11DeviceContext* ctx = nullptr;
     g_device->GetImmediateContext(&ctx);
     ctx->CopyResource(g_hudCopy, bb);
+    if (look.keyBlack) {
+      g_titleMeter.gridLevel = 3;  // 2560x1440 -> 320x180
+      g_titleMeter.gridBrightness = true;
+      g_titleMeter.Sample(g_hudCopy);
+    }
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
       Constants& c = *static_cast<Constants*>(mapped.pData);
@@ -634,6 +850,8 @@ bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look) {
       c.hud3[1] = 0;
       c.hud3[2] = w;
       c.hud3[3] = std::round(h * look.sideHeight);
+      if (look.keyBlack && look.cut[2] > look.cut[0])
+        for (int k = 0; k < 4; ++k) c.hud4[k] = std::round(look.cut[k] * (k % 2 ? h : w));
       ctx->Unmap(g_cb, 0);
     }
     StateBackup backup;
@@ -663,6 +881,257 @@ bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look) {
   }
   bb->Release();
   return ok;
+}
+
+namespace {
+
+// ---- Title screen: the character picture standing in the scene ------------------------------------
+// Scene depth at one pixel (read back a frame later), and the picture drawn as a card in an eye image.
+constexpr char kCutoutShader[] = R"(
+cbuffer C : register(b0) { float4 c01; float4 c23; float4 rect; float4 probe; };  // corners NDC: BL BR TR TL
+Texture2D<float4> pic : register(t0);
+Texture2D<float> depth : register(t1);
+SamplerState samp : register(s0);
+struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+VSOut VS(uint id : SV_VertexID) {
+  uint k = id < 3 ? id : (id == 3 ? 0 : (id == 4 ? 2 : 3));  // BL BR TR, BL TR TL
+  float2 ndc = k == 0 ? c01.xy : (k == 1 ? c01.zw : (k == 2 ? c23.xy : c23.zw));
+  VSOut o;
+  o.pos = float4(ndc, 0, 1);
+  o.uv = float2((k == 1 || k == 2) ? rect.z : rect.x, k >= 2 ? rect.y : rect.w);
+  return o;
+}
+float4 PS(VSOut i) : SV_Target {
+  float4 c = pic.SampleLevel(samp, i.uv, 0);
+  return float4(c.rgb, smoothstep(0.03, 0.12, max(c.r, max(c.g, c.b))));  // the title layer's black is see-through
+}
+float4 VSProbe(uint id : SV_VertexID) : SV_Position { return float4((id << 1) & 2 ? 3 : -1, id & 2 ? -3 : 1, 0, 1); }
+float PSProbe() : SV_Target { return depth.Load(int3(probe.xy, 0)); }
+)";
+ID3D11VertexShader* g_cutVs = nullptr;
+ID3D11PixelShader* g_cutPs = nullptr;
+ID3D11VertexShader* g_probeVs = nullptr;
+ID3D11PixelShader* g_probePs = nullptr;
+ID3D11Buffer* g_cutCb = nullptr;
+ID3D11Texture2D* g_probeTex = nullptr;   // 1x1 R32F
+ID3D11RenderTargetView* g_probeRtv = nullptr;
+ID3D11Texture2D* g_probeStaging = nullptr;
+bool g_probePending = false;
+float g_probeValue = -1;
+bool g_cutFailed = false;
+
+void ReleaseCutout() {
+  SafeRelease(g_cutVs);
+  SafeRelease(g_cutPs);
+  SafeRelease(g_probeVs);
+  SafeRelease(g_probePs);
+  SafeRelease(g_cutCb);
+  SafeRelease(g_probeRtv);
+  SafeRelease(g_probeTex);
+  SafeRelease(g_probeStaging);
+  g_probePending = false;
+  g_probeValue = -1;
+}
+
+bool EnsureCutout() {
+  if (g_cutPs) return true;
+  if (g_cutFailed || !g_device) return false;
+  ID3DBlob *vs = nullptr, *ps = nullptr, *pvs = nullptr, *pps = nullptr, *err = nullptr;
+  auto compile = [&](const char* entry, const char* target, ID3DBlob** out) {
+    return SUCCEEDED(D3DCompile(kCutoutShader, sizeof(kCutoutShader) - 1, "gdvr_cutout", nullptr, nullptr, entry, target, 0,
+                                0, out, &err));
+  };
+  bool ok = compile("VS", "vs_5_0", &vs) && compile("PS", "ps_5_0", &ps) && compile("VSProbe", "vs_5_0", &pvs) &&
+            compile("PSProbe", "ps_5_0", &pps);
+  if (!ok && err) Log("cutout: shader: %s", static_cast<const char*>(err->GetBufferPointer()));
+  ok = ok && SUCCEEDED(g_device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &g_cutVs)) &&
+       SUCCEEDED(g_device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &g_cutPs)) &&
+       SUCCEEDED(g_device->CreateVertexShader(pvs->GetBufferPointer(), pvs->GetBufferSize(), nullptr, &g_probeVs)) &&
+       SUCCEEDED(g_device->CreatePixelShader(pps->GetBufferPointer(), pps->GetBufferSize(), nullptr, &g_probePs));
+  SafeRelease(vs);
+  SafeRelease(ps);
+  SafeRelease(pvs);
+  SafeRelease(pps);
+  SafeRelease(err);
+  D3D11_BUFFER_DESC bd{64, D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
+  D3D11_TEXTURE2D_DESC td{};
+  td.Width = td.Height = 1;
+  td.MipLevels = td.ArraySize = 1;
+  td.Format = DXGI_FORMAT_R32_FLOAT;
+  td.SampleDesc.Count = 1;
+  td.BindFlags = D3D11_BIND_RENDER_TARGET;
+  D3D11_TEXTURE2D_DESC sd = td;
+  sd.BindFlags = 0;
+  sd.Usage = D3D11_USAGE_STAGING;
+  sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  ok = ok && SUCCEEDED(g_device->CreateBuffer(&bd, nullptr, &g_cutCb)) && SUCCEEDED(g_device->CreateTexture2D(&td, nullptr, &g_probeTex)) &&
+       SUCCEEDED(g_device->CreateRenderTargetView(g_probeTex, nullptr, &g_probeRtv)) &&
+       SUCCEEDED(g_device->CreateTexture2D(&sd, nullptr, &g_probeStaging));
+  if (!ok) {
+    Log("cutout: unavailable");
+    g_cutFailed = true;
+    ReleaseCutout();
+  }
+  return ok;
+}
+
+bool EnsureDepthSrv() {
+  if (!g_depthTex) return false;
+  if (g_depthSrv && g_depthSrvTex == g_depthTex) return true;
+  SafeRelease(g_depthSrv);
+  D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+  sd.Format = SrvFormatFor(g_depthFormat);
+  sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+  sd.Texture2D.MipLevels = 1;
+  g_depthSrvTex = g_depthTex;
+  return SUCCEEDED(g_device->CreateShaderResourceView(g_depthTex, &sd, &g_depthSrv));
+}
+
+void SetCutoutConstants(ID3D11DeviceContext* ctx, const float c[16]) {
+  D3D11_MAPPED_SUBRESOURCE m;
+  if (SUCCEEDED(ctx->Map(g_cutCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+    std::memcpy(m.pData, c, 64);
+    ctx->Unmap(g_cutCb, 0);
+  }
+}
+
+}  // namespace
+
+void ProbeDepth(float px, float py) {
+  if (!g_capturingAllowed || g_failed || !EnsureCutout() || !EnsureDepthSrv()) return;
+  ID3D11DeviceContext* ctx = nullptr;
+  g_device->GetImmediateContext(&ctx);
+  if (g_probePending) {  // the previous request
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (ctx->Map(g_probeStaging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m) == S_OK) {
+      g_probeValue = *static_cast<const float*>(m.pData);
+      ctx->Unmap(g_probeStaging, 0);
+      g_probePending = false;
+    }
+  }
+  if (!g_probePending) {
+    const float c[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, std::floor(px), std::floor(py), 0, 0};
+    SetCutoutConstants(ctx, c);
+    StateBackup backup;
+    backup.Save(ctx);
+    const D3D11_VIEWPORT vp{0, 0, 1, 1, 0, 1};
+    ctx->RSSetViewports(1, &vp);
+    ctx->RSSetState(g_raster);
+    ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+    ctx->OMSetDepthStencilState(g_depthState, 0);
+    g_origOMSetRenderTargets(ctx, 1, &g_probeRtv, nullptr);
+    ID3D11ShaderResourceView* srvs[2] = {nullptr, g_depthSrv};
+    ctx->PSSetShaderResources(0, 2, srvs);
+    ctx->PSSetConstantBuffers(0, 1, &g_cutCb);
+    ctx->VSSetShader(g_probeVs, nullptr, 0);
+    ctx->PSSetShader(g_probePs, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* none[2] = {};
+    ctx->PSSetShaderResources(0, 2, none);
+    backup.Restore(ctx);
+    ctx->CopyResource(g_probeStaging, g_probeTex);
+    g_probePending = true;
+  }
+  ctx->Release();
+}
+
+float ProbedDepth() { return g_probeValue; }
+
+void ClearSceneDepth(ID3D11DeviceContext* ctx) {
+  for (ID3D11DepthStencilView*& v : g_sceneDsvs) {
+    if (!v) continue;
+    ID3D11Resource* res = nullptr;
+    v->GetResource(&res);
+    D3D11_TEXTURE2D_DESC d{};
+    ID3D11Texture2D* tex = nullptr;
+    if (res && SUCCEEDED(res->QueryInterface(IID_PPV_ARGS(&tex)))) tex->GetDesc(&d);
+    SafeRelease(tex);
+    SafeRelease(res);
+    if (d.Width != g_wantWidth || d.Height != g_wantHeight) {  // resized since: forget it
+      SafeRelease(v);
+      continue;
+    }
+    ctx->ClearDepthStencilView(v, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+  }
+}
+
+bool TitleCharacterRect(float rect[4]) {
+  std::lock_guard lock(g_titleMeter.gridMutex);
+  const auto& g = g_titleMeter.grid;
+  const UINT w = g_titleMeter.gridW, h = g_titleMeter.gridH;
+  if (g.empty() || !w || !h) return false;
+  // The middle of the screen, between the logo (top) and the buttons (bottom).
+  const UINT x0 = UINT(w * 0.30f), x1 = UINT(w * 0.70f), y0 = UINT(h * 0.24f), y1 = UINT(h * 0.89f);
+  UINT minX = w, minY = h, maxX = 0, maxY = 0, count = 0;
+  for (UINT y = y0; y < y1; ++y)
+    for (UINT x = x0; x < x1; ++x)
+      if (g[size_t(y) * w + x] > 20) {
+        minX = std::min(minX, x);
+        maxX = std::max(maxX, x);
+        minY = std::min(minY, y);
+        maxY = std::max(maxY, y);
+        ++count;
+      }
+  if (count < 40) return false;
+  rect[0] = float(minX) / w - 0.01f;
+  rect[1] = float(minY) / h - 0.01f;
+  rect[2] = float(maxX + 1) / w + 0.01f;
+  rect[3] = float(maxY + 1) / h + 0.01f;
+  return true;
+}
+
+void DrawCutout(IDXGISwapChain* swapChain, const EyeCam& cam, const Vec3 corners[4], const float rect[4]) {
+  if (!g_capturingAllowed || g_failed || !g_hudCopySrv || !swapChain || !EnsureCutout()) return;
+  float c[16];
+  for (int k = 0; k < 4; ++k) {
+    const Vec3 d = corners[k] - cam.origin;
+    const float z = Dot(d, cam.forward);
+    if (z <= cam.nearPlane) return;
+    c[k * 2] = Dot(d, cam.right) / (z * cam.tanX);
+    c[k * 2 + 1] = Dot(d, cam.up) / (z * cam.tanY);
+  }
+  for (int k = 0; k < 4; ++k) c[8 + k] = rect[k];
+  c[12] = c[13] = c[14] = c[15] = 0;
+  ID3D11Texture2D* bb = nullptr;
+  if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) return;
+  if (EnsureDeviceAndRtv(bb)) {
+    D3D11_TEXTURE2D_DESC bd;
+    bb->GetDesc(&bd);
+    ID3D11DeviceContext* ctx = nullptr;
+    g_device->GetImmediateContext(&ctx);
+    SetCutoutConstants(ctx, c);
+    StateBackup backup;
+    backup.Save(ctx);
+    const D3D11_VIEWPORT vp{0, 0, float(bd.Width), float(bd.Height), 0, 1};
+    ctx->RSSetViewports(1, &vp);
+    ctx->RSSetState(g_raster);
+    const float factor[4] = {};
+    ctx->OMSetBlendState(g_blend, factor, 0xFFFFFFFF);
+    ctx->OMSetDepthStencilState(g_depthState, 0);
+    g_origOMSetRenderTargets(ctx, 1, &g_rtv, nullptr);
+    ctx->PSSetShaderResources(0, 1, &g_hudCopySrv);
+    ctx->PSSetSamplers(0, 1, &g_sampClamp);
+    ctx->PSSetConstantBuffers(0, 1, &g_cutCb);
+    ctx->VSSetConstantBuffers(0, 1, &g_cutCb);
+    ctx->VSSetShader(g_cutVs, nullptr, 0);
+    ctx->PSSetShader(g_cutPs, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->Draw(6, 0);
+    ID3D11ShaderResourceView* none = nullptr;
+    ctx->PSSetShaderResources(0, 1, &none);
+    backup.Restore(ctx);
+    ctx->Release();
+  }
+  bb->Release();
 }
 
 bool Apply(IDXGISwapChain* swapChain, const Params& p) {
@@ -723,34 +1192,110 @@ bool Apply(IDXGISwapChain* swapChain, const Params& p) {
       c.sky5[0] = p.backdropBrightness;
       c.sky5[1] = p.dome ? 1.0f : 0.0f;
       c.sky5[2] = p.domeHorizon;
+      c.ao[0] = p.debug ? 0.0f : p.contactStrength;
+      c.ao[1] = p.contactSoftness;
+      c.ao[3] = p.contactSize;
+      const PrevView& pv = g_aoPrev[p.eye & 1];
+      Set4(c.prevR, pv.right, pv.tanX);
+      Set4(c.prevU, pv.up, pv.tanY);
+      Set4(c.prevF, pv.forward, 0);
+      Set4(c.prevO, pv.origin, pv.valid ? 1.0f : 0.0f);
       ctx->Unmap(g_cb, 0);
     }
+
+    // Contact shadows: this eye's linear depth, then its mips (the blurred surroundings).
+    bool contact = p.contactStrength > 0 && !p.debug && g_linPs && g_aoPs;
+    if (contact && g_linTex) {
+      D3D11_TEXTURE2D_DESC d;
+      g_linTex->GetDesc(&d);
+      if (d.Width != depthDesc.Width || d.Height != depthDesc.Height) {
+        SafeRelease(g_linSrv);
+        SafeRelease(g_linRtv);
+        SafeRelease(g_linTex);
+        SafeRelease(g_aoSrv);
+        SafeRelease(g_aoRtv);
+        SafeRelease(g_aoTex);
+        ReleaseContactTextures();
+      }
+    }
+    if (contact && !g_linTex) {
+      const UINT w = depthDesc.Width, h = depthDesc.Height;
+      if (!MakeMipTarget(w, h, g_linTex, g_linRtv, g_linSrv) ||
+          !MakeMipTarget(std::max(1u, w / 2), std::max(1u, h / 2), g_aoTex, g_aoRtv, g_aoSrv) ||
+          !MakeContactTextures(std::max(1u, w / 2), std::max(1u, h / 2))) {
+        ReleaseContactTextures();
+        Log("mask: contact shadows unavailable (textures)");
+        SafeRelease(g_linSrv);
+        SafeRelease(g_linRtv);
+        SafeRelease(g_linTex);
+        SafeRelease(g_aoSrv);
+        SafeRelease(g_aoRtv);
+        SafeRelease(g_aoTex);
+        SafeRelease(g_linPs);  // don't try again
+      }
+    }
+    contact = contact && g_linSrv && g_aoSrv && g_aoOutSrv && g_temporalPs;
+    if (!contact) g_aoPrev[0].valid = g_aoPrev[1].valid = false;  // stale when it comes back on
 
     StateBackup backup;
     backup.Save(ctx);
     D3D11_VIEWPORT vp{0, 0, float(bbDesc.Width), float(bbDesc.Height), 0, 1};
     ctx->RSSetViewports(1, &vp);
     ctx->RSSetState(g_raster);
-    const float factor[4] = {0, 0, 0, 0};
-    ctx->OMSetBlendState(g_blend, factor, 0xFFFFFFFF);
     ctx->OMSetDepthStencilState(g_depthState, 0);
-    g_origOMSetRenderTargets(ctx, 1, &g_rtv, nullptr);
-    ID3D11ShaderResourceView* srvs[3] = {g_depthSrv, static_cast<ID3D11ShaderResourceView*>(p.skyConstellations),
-                                         static_cast<ID3D11ShaderResourceView*>(p.skyBackdrop)};
-    ctx->PSSetShaderResources(0, 3, srvs);
     ID3D11SamplerState* samplers[2] = {g_sampClamp, g_sampWrap};
     ctx->PSSetSamplers(0, 2, samplers);
     ctx->PSSetConstantBuffers(0, 1, &g_cb);
-    ctx->PSSetShader(g_ps, nullptr, 0);
     ctx->VSSetShader(g_vs, nullptr, 0);
     ctx->GSSetShader(nullptr, nullptr, 0);
     ctx->HSSetShader(nullptr, nullptr, 0);
     ctx->DSSetShader(nullptr, nullptr, 0);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->IASetInputLayout(nullptr);
+    if (contact) {
+      // 1. linear depth (full size) and its mips; 2. occlusion at half size and its mips (the blur).
+      ID3D11RenderTargetView* noRtv = nullptr;
+      ID3D11ShaderResourceView* noSrv = nullptr;
+      ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+      g_origOMSetRenderTargets(ctx, 1, &g_linRtv, nullptr);
+      ctx->PSSetShaderResources(0, 1, &g_depthSrv);
+      ctx->PSSetShader(g_linPs, nullptr, 0);
+      ctx->Draw(3, 0);
+      g_origOMSetRenderTargets(ctx, 1, &noRtv, nullptr);
+      ctx->GenerateMips(g_linSrv);
+      const D3D11_VIEWPORT half{0, 0, float(std::max(1u, bbDesc.Width / 2)), float(std::max(1u, bbDesc.Height / 2)), 0, 1};
+      ctx->RSSetViewports(1, &half);
+      g_origOMSetRenderTargets(ctx, 1, &g_aoRtv, nullptr);
+      ctx->PSSetShaderResources(3, 1, &g_linSrv);
+      ctx->PSSetShader(g_aoPs, nullptr, 0);
+      ctx->Draw(3, 0);
+      g_origOMSetRenderTargets(ctx, 1, &noRtv, nullptr);
+      // 3. smoothed over time with this eye's previous result, then its mips (the blur) and a copy for next time
+      const int e = p.eye & 1;
+      g_origOMSetRenderTargets(ctx, 1, &g_aoOutRtv, nullptr);
+      ID3D11ShaderResourceView* tin[3] = {g_linSrv, g_aoSrv, g_aoHistSrv[e]};
+      ctx->PSSetShaderResources(3, 3, tin);
+      ctx->PSSetShader(g_temporalPs, nullptr, 0);
+      ctx->Draw(3, 0);
+      g_origOMSetRenderTargets(ctx, 1, &noRtv, nullptr);
+      ID3D11ShaderResourceView* none3[3] = {};
+      ctx->PSSetShaderResources(3, 3, none3);
+      ctx->GenerateMips(g_aoOutSrv);
+      ctx->CopySubresourceRegion(g_aoHist[e], 0, 0, 0, 0, g_aoOut, 0, nullptr);
+      g_aoPrev[e] = {p.right, p.up, p.forward, p.origin, p.tanX, p.tanY, true};
+      ctx->RSSetViewports(1, &vp);
+    }
+    const float factor[4] = {0, 0, 0, 0};
+    ctx->OMSetBlendState(g_blend, factor, 0xFFFFFFFF);
+    g_origOMSetRenderTargets(ctx, 1, &g_rtv, nullptr);
+    ID3D11ShaderResourceView* srvs[5] = {g_depthSrv, static_cast<ID3D11ShaderResourceView*>(p.skyConstellations),
+                                         static_cast<ID3D11ShaderResourceView*>(p.skyBackdrop), nullptr,
+                                         contact ? g_aoOutSrv : nullptr};
+    ctx->PSSetShaderResources(0, 5, srvs);
+    ctx->PSSetShader(g_ps, nullptr, 0);
     ctx->Draw(3, 0);
-    ID3D11ShaderResourceView* none[3] = {};
-    ctx->PSSetShaderResources(0, 3, none);
+    ID3D11ShaderResourceView* none[5] = {};
+    ctx->PSSetShaderResources(0, 5, none);
     backup.Restore(ctx);
   }
 
@@ -874,12 +1419,25 @@ void Shutdown() {
   SafeRelease(g_hudPs);
   g_sceneMeter.Release();
   g_hudMeter.Release();
+  for (ID3D11DepthStencilView*& v : g_sceneDsvs) SafeRelease(v);
+  g_titleMeter.Release();
+  ReleaseCutout();
   g_sceneMeter.value = -1.0f;
   g_hudMeter.value = -1.0f;
   SafeRelease(g_hudCopySrv);
   SafeRelease(g_hudCopy);
   SafeRelease(g_cb);
   SafeRelease(g_blend);
+  SafeRelease(g_linPs);
+  SafeRelease(g_linSrv);
+  SafeRelease(g_linRtv);
+  SafeRelease(g_linTex);
+  SafeRelease(g_aoPs);
+  SafeRelease(g_aoSrv);
+  SafeRelease(g_aoRtv);
+  SafeRelease(g_aoTex);
+  ReleaseContactTextures();
+  SafeRelease(g_temporalPs);
   SafeRelease(g_sampClamp);
   SafeRelease(g_sampWrap);
   SafeRelease(g_depthState);

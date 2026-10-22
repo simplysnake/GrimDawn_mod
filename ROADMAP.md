@@ -65,6 +65,16 @@ One pipeline: a point in the 3D world becomes the game's mouse position. Sources
 - Full-screen map (M) – ideally as a tabletop map; merchants/stash, dialogue, character select, the real
   devotion screen, video cutscenes (currently HUD panel or flat-screen fallback).
 
+### 7b. Title screen characters in true 3D – medium (a few sessions)
+- Today the character on the title / character-select screen is a flat picture: the game renders it from
+  its 3D model, but in a separate render straight into the menu layer, so it only has one view.
+- Find that render in the engine (not `GraphicsMTRenderer::Render`, which the mod already hooks: the frame
+  log shows one world render per frame on the title screen) – trace the draws that produce the character.
+- Render it once per eye with the same eye offsets as the world.
+- Show each eye its own copy: two OpenXR quad layers with `eyeVisibility` left / right (or draw it into the
+  eye images at a chosen distance), so the character stands in the menu scene with real depth.
+- Keep the flat picture as the fallback if the render can't be found after a game patch.
+
 ### 8. Controllers beyond Index – small
 - Default bindings for Quest 3 Touch Plus, Windows Mixed Reality, Pico, Vive Cosmos.
 - Meta / Virtual Desktop native runtimes have no SteamVR binding UI: add an in-mod remap for them.

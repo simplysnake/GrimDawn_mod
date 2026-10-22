@@ -332,9 +332,27 @@ using HandleActionFn = uintptr_t (*)(void*, uintptr_t, uintptr_t, uintptr_t, uin
 HandleActionFn g_origHandleAction = nullptr;
 std::atomic<unsigned long long> g_actions{0};
 
+// The pointed ground spot when the click had to be pulled onto the game's screen (behind the character
+// the ground is below the screen's edge or under the skill bar): the game's action gets this spot instead
+// of the pulled-in one, so the character walks (or casts) where the laser points, in any direction.
+std::mutex g_targetMutex;
+float g_trueTarget[3] = {};
+double g_trueTargetUntil = 0;  // HookNowMs() time it stays valid
+std::atomic<unsigned long long> g_targetOverrides{0};
+
 uintptr_t HookHandleAction(void* self, uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, const void* where,
                            void* id, void* flag) {
   ++g_inFlight;
+  alignas(8) unsigned char moved[32];  // WorldVec3: Region* (8 bytes) + x, y, z
+  if (where) {
+    std::lock_guard lock(g_targetMutex);
+    if (HookNowMs() < g_trueTargetUntil) {
+      std::memcpy(moved, where, 24);
+      std::memcpy(moved + 8, g_trueTarget, sizeof(g_trueTarget));
+      where = moved;
+      ++g_targetOverrides;
+    }
+  }
   const uintptr_t r = g_origHandleAction(self, a, b, c, d, where, id, flag);
   ++g_actions;
   static ULONGLONG lastLog = 0;
@@ -342,8 +360,8 @@ uintptr_t HookHandleAction(void* self, uintptr_t a, uintptr_t b, uintptr_t c, ui
     lastLog = GetTickCount64();
     float p[3] = {};
     if (where) std::memcpy(p, static_cast<const char*>(where) + 8, sizeof(p));
-    Log("pointer: game mouse action flags %d %d %d %d at (%.1f %.1f %.1f) -> %d", int(a & 0xFF), int(b & 0xFF),
-        int(c & 0xFF), int(d & 0xFF), p[0], p[1], p[2], int(r & 0xFF));
+    Log("pointer: game mouse action flags %d %d %d %d at (%.1f %.1f %.1f) -> %d%s", int(a & 0xFF), int(b & 0xFF),
+        int(c & 0xFF), int(d & 0xFF), p[0], p[1], p[2], int(r & 0xFF), where == moved ? " (real pointed spot)" : "");
   }
   --g_inFlight;
   return r;
@@ -599,29 +617,44 @@ bool ToClient(const GameView& g, Vec3 p, float& x, float& y) {
   return std::isfinite(x) && std::isfinite(y);
 }
 
-// The game can only click what is on its own (narrow) screen. A spot outside it is pulled in along the
-// line from the character until it is just inside, so walking works in every direction.
+// The game can only click what is on its own (narrow) screen, and not where its HUD is (a click there would
+// hit the skill bar). A spot outside that is pulled in along the line from the character until it is on the
+// screen and clear of the HUD; the game's action is then given the real spot anyway (HookHandleAction), so
+// the pulled-in click only has to be safe and in the right direction.
+// Only the game's own screen and HUD image are used here, never where the HUD panel floats in VR, so this
+// keeps working when the HUD moves (to a hand, say).
 bool ToClientOnScreen(const GameView& g, Vec3 from, Vec3 to, float& x, float& y, bool& pulled) {
   constexpr float kMargin = 0.04f;  // fraction of the screen kept clear at the edges
-  auto inside = [&](Vec3 p, float& px, float& py) {
-    if (!ToClient(g, p, px, py) || px < g.width * kMargin || px > g.width * (1 - kMargin) || py < g.height * kMargin ||
-        py > g.height * (1 - kMargin))
-      return false;
-    // Not on a HUD element either (a click there would hit the skill bar instead of the ground).
+  auto onScreen = [&](Vec3 p, float& px, float& py) {
+    return ToClient(g, p, px, py) && px >= g.width * kMargin && px <= g.width * (1 - kMargin) &&
+           py >= g.height * kMargin && py <= g.height * (1 - kMargin);
+  };
+  // Clear of the HUD. Mouse-cursor arrows are drawn in the HUD image too (where the mod puts the cursor,
+  // and one at the screen centre - right on the character): those don't count.
+  const float cx = float(g_feedX.load()), cy = float(g_feedY.load());
+  auto clear = [&](float px, float py) {
+    auto closeTo = [&](float ax, float ay) { return (px - ax) * (px - ax) + (py - ay) * (py - ay) < 72.0f * 72.0f; };
+    if (closeTo(cx, cy) || closeTo(g.width * 0.5f, g.height * 0.5f)) return true;
     return mask::HudAlphaAt(px / g.width, py / g.height) < 0.3f;
   };
   pulled = false;
-  if (inside(to, x, y)) return true;
+  if (onScreen(to, x, y) && clear(x, y)) return true;
   float px, py;
-  if (!inside(from, px, py)) return false;
-  float lo = 0, hi = 1;  // fraction of the way from `from` to `to` that is still on screen
+  if (!onScreen(from, px, py)) return false;  // the character itself is off the game's screen
+  float lo = 0, hi = 1;  // fraction of the way from `from` to `to` that is still on the screen
   for (int i = 0; i < 20; ++i) {
     const float mid = (lo + hi) * 0.5f;
     float mx, my;
-    if (inside(from + (to - from) * mid, mx, my)) lo = mid; else hi = mid;
+    if (onScreen(from + (to - from) * mid, mx, my)) lo = mid; else hi = mid;
   }
   pulled = true;
-  return ToClient(g, from + (to - from) * lo, x, y);
+  // Back towards the character until the spot is clear of the HUD.
+  for (int i = 0; i < 12; ++i) {
+    const float f = lo * (1.0f - i * 0.08f);
+    if (ToClient(g, from + (to - from) * f, x, y) && clear(x, y)) return true;
+  }
+  // Nothing clear (HUD all around): right next to the character, in that direction.
+  return ToClient(g, from + (to - from) * (lo * 0.05f), x, y);
 }
 
 // Projects a game-space point into this eye's image (pixels); false if behind the eye.
@@ -800,7 +833,19 @@ void Update(Vec3 origin, Vec3 right, Vec3 up, Vec3 fwd, float scale, Vec3 target
         feed = true;
         st.moving = true;
         out.buttons[0] = true;
+        if (pulled) {
+          std::lock_guard lock(g_targetMutex);
+          const Vec3 t = target + dir * kMoveAhead;
+          g_trueTarget[0] = t.x, g_trueTarget[1] = t.y, g_trueTarget[2] = t.z;
+          g_trueTargetUntil = HookNowMs() + 150;
+        }
       }
+    }
+    // Laser clicks on the ground whose click was pulled in: the game acts at the real spot (hook above).
+    if ((out.buttons[0] || out.buttons[1]) && !st.moving && st.onGround && st.pulled) {
+      std::lock_guard lock(g_targetMutex);
+      g_trueTarget[0] = st.end.x, g_trueTarget[1] = st.end.y, g_trueTarget[2] = st.end.z;
+      g_trueTargetUntil = HookNowMs() + 150;
     }
   }
   if (now < g_parkUntil.load()) {  // parked: off-screen, no clicks (screen captures without hover text)

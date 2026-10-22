@@ -19,6 +19,13 @@ struct Settings {
   float screenDistance = 2.0f;  // Screen mode: metres in front of you
   float screenWidth = 3.0f;     // Screen mode: metres wide
   float cameraPull = 6.0f;       // game units the viewpoint moves towards the character (closer zoom range)
+  bool contactShadowsOn = true;   // contact shadows on/off (keeps the strength below)
+  float contactShadows = 0.6f;   // darkening where grass, rocks and characters meet the ground (0 = off)
+  float contactSoftness = 1.5f;  // ...how soft (blur level)
+  float contactSize = 1.0f;      // ...how far from a contact the darkening reaches (game units)
+  bool titleCutout = true;       // title screen: the character picture stands in the 3D scene
+  bool mirror = true;            // the game window shows the left eye with the HUD (for recording/streaming)
+  float mirrorFovDeg = 90.0f;    // ...cropped to this horizontal field of view
   float farPlane = 70.0f;       // far plane for the eye cameras (game: 120); the biggest performance lever
   bool maskEnabled = true;       // fade to black around the player
   float maskInner = 45.0f;      // horizontal distance from the player where the fade starts (game units)
@@ -115,6 +122,9 @@ bool StereoFrameActive();
 
 // Whether the world being rendered has a character in it (false on the title screen). From the renderer.
 void SetInWorld(bool inWorld);
+
+// Title screen: the character picture's rect in the menu layer (fractions u0 v0 u1 v1), if found.
+bool TitleCutout(float rect[4]);
 
 // Eye pose for this frame, relative to the recentred origin (OpenXR axes: +Y up, -Z forward, metres).
 Pose EyePose(int eye);
