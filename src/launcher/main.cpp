@@ -210,6 +210,7 @@ std::string MakeVrOptions(const std::string& vanilla) {
       {"shadowQuality", "medium"},     // the scene is drawn twice
       {"reflectionQuality", "medium"},
       {"gamepadSupport", "true"},      // the controllers can also drive the game's gamepad mode
+      {"detailObjects", "false"},      // ground clutter: with VR's wide view it made the GPU hang (device reset)
   };
   std::istringstream in(vanilla);
   std::ostringstream out;

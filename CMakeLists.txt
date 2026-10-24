@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(gdvr VERSION 0.3.0 LANGUAGES C CXX)
+project(gdvr VERSION 0.3.1 LANGUAGES C CXX)
 
 # Development builds (default) log into the repo and keep the diagnostics; release builds (package.ps1)
 # use only the install folder and %LOCALAPPDATA%\gdvr.
@@ -72,7 +72,7 @@ add_library(gdvr SHARED
   src/gdvr/sky.cpp
   src/gdvr/pointer.cpp
   src/gdvr/xr.cpp)
-target_link_libraries(gdvr PRIVATE minhook imgui openxr_loader d3d11 dxgi d3dcompiler dinput8 dxguid windowscodecs ole32)
+target_link_libraries(gdvr PRIVATE minhook imgui openxr_loader d3d11 dxgi d3dcompiler dinput8 dxguid windowscodecs ole32 dbghelp)
 target_compile_definitions(gdvr PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE GDVR_VERSION="${PROJECT_VERSION}")
 if(GDVR_DEV)
   # Development builds also log into the repo (logs/), readable from tools that can't see %LOCALAPPDATA%.

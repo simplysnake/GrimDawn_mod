@@ -516,7 +516,7 @@ void MapControls(const XINPUT_GAMEPAD& c, double now, Output& out) {
 constexpr float kZoomPerPad = 5.0f;   // GameCamera::Zoom units per pad unit (10 = the whole range)
 constexpr float kYawPerPad = 1.2f;    // radians per pad unit (sliding the whole pad: ~140 degrees)
 constexpr float kPadDeadband = 0.01f; // per-frame jitter ignored
-constexpr float kMaxYawPerFrame = 0.025f;  // radians: a quick slide turns smoothly instead of jumping
+constexpr float kMaxYawPerFrame = 0.012f;  // radians: a quick slide turns smoothly instead of jumping
                                            // (a jump brings a lot of new ground into view at once)
 
 struct CameraApi {
@@ -718,6 +718,12 @@ bool Install() {
 
 bool Live() { return LiveNow(); }
 
+bool CursorFeed(float& x, float& y) {
+  x = float(g_feedX.load());
+  y = float(g_feedY.load());
+  return g_feeding.load();
+}
+
 void ParkCursor(double ms) { g_parkUntil = NowMs() + ms; }
 
 void TapKey(int dik) { g_forceUntil[dik & 0xFF] = HookNowMs() + 120.0; }
@@ -763,8 +769,9 @@ void Update(Vec3 origin, Vec3 right, Vec3 up, Vec3 fwd, float scale, Vec3 target
     // (both measured along the ray; the panel in metres).
     float u, v, panelDist;
     const bool menu = xr::HudMenuOpen();
-    if (xr::HudPanelRay(aim.position, dirRel, u, v, panelDist) && xr::HudSolidAt(u, v, g_onPanelLast) &&
-        (menu || groundT <= 0 || panelDist * scale < groundT)) {
+    if (xr::HandHudRay(aim.position, dirRel, u, v, panelDist) ||  // the bar on the off hand: always in front
+        (xr::HudPanelRay(aim.position, dirRel, u, v, panelDist) && xr::HudSolidAt(u, v, g_onPanelLast) &&
+         (menu || groundT <= 0 || panelDist * scale < groundT))) {
       st.onPanel = true;
       st.onGround = false;
       st.panelU = u;

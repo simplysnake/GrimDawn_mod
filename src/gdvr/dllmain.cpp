@@ -1,6 +1,9 @@
 #include <windows.h>
 
 #include <atomic>
+#include <string>
+
+#include <dbghelp.h>
 
 #include <MinHook.h>
 
@@ -13,13 +16,56 @@
 #include "log.h"
 #include "mask.h"
 #include "overlay.h"
+#include "paths.h"
 #include "perf.h"
 #include "xr.h"
 
 namespace {
 
 HANDLE g_initThread = nullptr;
+HANDLE g_watchdog = nullptr;
 std::atomic<bool> g_stopping{false};
+
+// Freeze watchdog: if the game stops showing frames for a while (a hang, not a crash: nothing else records
+// it), write a dump with every thread's stack, so the place it hangs can be found even after the game is
+// closed. Once per hang.
+void WriteFreezeDump(const std::wstring& dir, const std::wstring& name) {
+  const std::wstring path = dir + L"\\" + name;
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return;
+  const auto type = MINIDUMP_TYPE(MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules | MiniDumpWithHandleData);
+  const BOOL ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type, nullptr, nullptr, nullptr);
+  CloseHandle(file);
+  gdvr::Log("freeze watchdog: no frame for 6 s, %s %ls (graphics device: %s 0x%08lX)", ok ? "dump written" : "dump FAILED",
+            path.c_str(), gdvr::xr::DeviceRemovedReason() ? "LOST" : "ok", static_cast<unsigned long>(gdvr::xr::DeviceRemovedReason()));
+}
+
+DWORD WINAPI Watchdog(LPVOID) {
+  constexpr ULONGLONG kStallMs = 6000;
+  bool dumped = false;
+  while (!g_stopping) {
+    Sleep(1000);
+    const ULONGLONG last = gdvr::overlay::LastPresentTick();
+    if (!last) continue;
+    const ULONGLONG stalled = GetTickCount64() - last;
+    if (stalled < kStallMs) {
+      dumped = false;
+      continue;
+    }
+    if (dumped) continue;
+    dumped = true;  // (the dump first: a hung thread might hold the log's lock)
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    wchar_t name[64];
+    swprintf_s(name, L"freeze_%04d%02d%02d-%02d%02d%02d.dmp", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+#ifdef GDVR_DEV_LOG_DIR
+    WriteFreezeDump(GDVR_DEV_LOG_DIR, name);
+#else
+    WriteFreezeDump(gdvr::paths::UserDir(), name);
+#endif
+  }
+  return 0;
+}
 
 DWORD WINAPI InitThread(LPVOID) {
   gdvr::Log("gdvr " GDVR_VERSION " loading");
@@ -65,6 +111,11 @@ DWORD WINAPI InitThread(LPVOID) {
 extern "C" __declspec(dllexport) DWORD WINAPI GDVR_Shutdown(LPVOID) {
   gdvr::Log("gdvr shutting down");
   g_stopping = true;  // the init thread may still be waiting for the game's input modules
+  if (g_watchdog) {
+    WaitForSingleObject(g_watchdog, 2000);
+    CloseHandle(g_watchdog);
+    g_watchdog = nullptr;
+  }
   if (g_initThread) {
     WaitForSingleObject(g_initThread, 2000);
     CloseHandle(g_initThread);
@@ -91,6 +142,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
   if (reason == DLL_PROCESS_ATTACH) {
     DisableThreadLibraryCalls(module);
     g_initThread = CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);
+    g_watchdog = CreateThread(nullptr, 0, Watchdog, nullptr, 0, nullptr);
   }
   return TRUE;
 }

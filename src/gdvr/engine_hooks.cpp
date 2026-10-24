@@ -129,10 +129,11 @@ void ReadTanFov(const gd::Camera* cam, const gd::Viewport* viewport, float& tanX
 
 // Sets the camera's FOV (vertical) and aspect so its symmetric frustum just covers the eye's
 // lens, then returns what the engine will really use. fovDeg > 0 forces a vertical FOV instead.
-void FitFrustum(gd::Camera* cam, const gd::Viewport* viewport, int eye, float fovDeg, float& tanX, float& tanY) {
-  constexpr float kMargin = 1.04f;  // a little extra so reprojection doesn't show edges
+void FitFrustum(gd::Camera* cam, const gd::Viewport* viewport, int eye, float fovDeg, float& tanX, float& tanY,
+                float widen = 1.0f) {
+  const float kMargin = 1.04f * widen;  // a little extra so reprojection doesn't show edges
   if (fovDeg > 0) {
-    g_setFov(cam, fovDeg * 3.14159265f / 180.0f);
+    g_setFov(cam, 2.0f * std::atan(std::tan(fovDeg * 3.14159265f / 360.0f) * widen));
     ReadTanFov(cam, viewport, tanX, tanY);
     return;
   }
@@ -443,6 +444,26 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   };
   snap(0);
 
+  // One culling view for both eyes: from between the eyes, a little wider than either. With a view per eye
+  // the game rebuilt grass (and other per-view data) back and forth between the two every frame, worst
+  // while the camera turned.
+  alignas(16) static unsigned char sharedFrustumBuf[4096];
+  const gd::Frustum* sharedFrustum = nullptr;
+  if (s.sharedFrustum && s.recomputeFrustum) {
+    const Pose p0 = xr::EyePose(0), p1 = xr::EyePose(1);
+    const Vec3 mid = (p0.position + p1.position) * 0.5f;
+    float headCoords[kCoordsCopy];
+    std::memcpy(headCoords, saved, sizeof(headCoords));
+    Write3(headCoords, kSide, toWorld(XrToCamera(Rotate(p0.orientation, {1, 0, 0}))) * -1.0f);
+    Write3(headCoords, kUp, toWorld(XrToCamera(Rotate(p0.orientation, {0, 1, 0}))));
+    Write3(headCoords, kForward, toWorld(XrToCamera(Rotate(p0.orientation, {0, 0, -1}))));
+    Write3(headCoords, kOrigin, origin + toWorld(XrToCamera(mid)) * s.worldScale);
+    g_setCoords(cam, reinterpret_cast<const gd::Coords*>(headCoords));
+    float tx, ty;
+    FitFrustum(cam, viewport, 0, s.fovDeg, tx, ty, 1.12f);
+    sharedFrustum = g_getFrustum(camera, reinterpret_cast<gd::Frustum*>(sharedFrustumBuf), viewport);
+  }
+
   uint8_t replayBytes[kReplaySize];
   for (int pass = 0; pass < 2; ++pass) {
     const int eye = s.swapEyeOrder ? 1 - pass : pass;
@@ -466,7 +487,9 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     }
 
     const gd::Frustum* eyeFrustum = frustum;
-    if (s.recomputeFrustum)
+    if (sharedFrustum)
+      eyeFrustum = sharedFrustum;
+    else if (s.recomputeFrustum)
       eyeFrustum = g_getFrustum(camera, reinterpret_cast<gd::Frustum*>(frustumBuf[eye]), viewport);
 
     if (pass == 0) perf::Mark(perf::kEye0Begin);
@@ -722,6 +745,7 @@ void PollControlFile() {
   if (vr.fovDeg > 0) vr.fovDeg = std::clamp(vr.fovDeg, 10.0f, 170.0f);
   vr.levelHorizon = getInt(L"level_horizon", vr.levelHorizon) != 0;
   vr.recomputeFrustum = getInt(L"recompute_frustum", vr.recomputeFrustum) != 0;
+  vr.sharedFrustum = getInt(L"shared_frustum", vr.sharedFrustum) != 0;
   vr.screenDistance = getFloat(L"screen_distance", vr.screenDistance);
   vr.screenWidth = getFloat(L"screen_width", vr.screenWidth);
   vr.bench = getInt(L"bench", vr.bench) != 0;
@@ -780,7 +804,7 @@ void PollControlFile() {
   vr.hudSideShift = getFloat(L"hud_side_shift", vr.hudSideShift);
   vr.hudSideWidth = getFloat(L"hud_side_width", vr.hudSideWidth);
   vr.hudSideHeight = getFloat(L"hud_side_height", vr.hudSideHeight);
-  vr.hudMenuCoverage = getFloat(L"hud_menu_coverage", vr.hudMenuCoverage);
+  vr.hudMenuCoverage = getFloat(L"hud_menu_content", vr.hudMenuCoverage);
   vr.labelsInWorld = getInt(L"labels_in_world", vr.labelsInWorld) != 0;
   vr.damageNumbers3d = getInt(L"damage_numbers_3d", vr.damageNumbers3d) != 0;
   vr.cameraPull = getFloat(L"camera_pull", vr.cameraPull);
@@ -789,6 +813,15 @@ void PollControlFile() {
   vr.contactSoftness = std::clamp(getFloat(L"contact_softness", vr.contactSoftness), 0.0f, 3.5f);
   vr.contactSize = getFloat(L"contact_size", vr.contactSize);
   vr.titleCutout = getInt(L"title_cutout", vr.titleCutout) != 0;
+  vr.handHud = getInt(L"hand_hud", vr.handHud) != 0;
+  vr.handHudWidth = getFloat(L"hand_hud_width", vr.handHudWidth);
+  vr.handHudUp = getFloat(L"hand_hud_up", vr.handHudUp);
+  vr.handHudBack = getFloat(L"hand_hud_back", vr.handHudBack);
+  vr.handHudTiltDeg = getFloat(L"hand_hud_tilt", vr.handHudTiltDeg);
+  vr.handHudRect[0] = getFloat(L"hand_hud_left", vr.handHudRect[0]);
+  vr.handHudRect[1] = getFloat(L"hand_hud_top", vr.handHudRect[1]);
+  vr.handHudRect[2] = getFloat(L"hand_hud_right", vr.handHudRect[2]);
+  vr.handHudRect[3] = getFloat(L"hand_hud_bottom", vr.handHudRect[3]);
   vr.mirror = getInt(L"mirror", vr.mirror) != 0;
   vr.mirrorFovDeg = getFloat(L"mirror_fov", vr.mirrorFovDeg);
   vr.sky = getInt(L"sky", vr.sky) != 0;
@@ -931,6 +964,11 @@ void DrawDebugUI() {
   const float scale = ImGui::GetIO().FontGlobalScale;
   ImGui::SetNextWindowSize(ImVec2(520 * scale, 640 * scale), ImGuiCond_FirstUseEver);
   ImGui::Begin("Grim Dawn VR " GDVR_VERSION "  (F8 hide)###gdvr");
+  {
+    const ImVec2 pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize(), screen = ImGui::GetIO().DisplaySize;
+    if (screen.x > 0 && screen.y > 0)
+      xr::SetDebugWindowRect(pos.x / screen.x, pos.y / screen.y, (pos.x + size.x) / screen.x, (pos.y + size.y) / screen.y);
+  }
   xr::DrawDebugUI();
   if (ImGui::CollapsingHeader("Diagnostics")) {
     xr::DrawDiagnostics();

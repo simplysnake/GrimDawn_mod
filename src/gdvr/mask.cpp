@@ -7,6 +7,7 @@
 
 #include <MinHook.h>
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -787,6 +788,59 @@ float HudRegionCoverage(float u0, float v0, float u1, float v1) {
     for (UINT x = x0; x < x1; ++x, ++total)
       if (g_hudMeter.grid[size_t(y) * g_hudMeter.gridW + x] > 77) ++drawn;  // alpha > 0.3
   return total ? float(drawn) / float(total) : -1.0f;
+}
+
+float HudContentCoverage(const float (*skipRects)[4], int rectCount, const float (*skip)[2], int skipCount,
+                         float skipRadius) {
+  std::lock_guard lock(g_hudMeter.gridMutex);
+  const UINT w = g_hudMeter.gridW, h = g_hudMeter.gridH;
+  if (g_hudMeter.grid.empty() || !w || !h) return -1.0f;
+  int drawn = 0, total = 0;
+  for (UINT y = 0; y < h; ++y)
+    for (UINT x = 0; x < w; ++x) {
+      const float u = (x + 0.5f) / w, v = (y + 0.5f) / h;
+      bool out = false;
+      for (int k = 0; k < rectCount && !out; ++k)
+        out = u >= skipRects[k][0] && u <= skipRects[k][2] && v >= skipRects[k][1] && v <= skipRects[k][3];
+      for (int k = 0; k < skipCount && !out; ++k) {
+        const float du = (u - skip[k][0]) * w / h, dv = v - skip[k][1];
+        out = du * du + dv * dv < skipRadius * skipRadius;
+      }
+      if (out) continue;
+      ++total;
+      if (g_hudMeter.grid[size_t(y) * w + x] > 77) ++drawn;  // alpha > 0.3
+    }
+  return total ? float(drawn) / float(total) : -1.0f;
+}
+
+bool HudContentBounds(const float region[4], const float (*skip)[2], int skipCount, float skipRadius, float out[4]) {
+  std::lock_guard lock(g_hudMeter.gridMutex);
+  const UINT w = g_hudMeter.gridW, h = g_hudMeter.gridH;
+  if (g_hudMeter.grid.empty() || !w || !h) return false;
+  const UINT x0 = UINT(std::clamp(region[0], 0.0f, 1.0f) * w), x1 = UINT(std::clamp(region[2], 0.0f, 1.0f) * w);
+  const UINT y0 = UINT(std::clamp(region[1], 0.0f, 1.0f) * h), y1 = UINT(std::clamp(region[3], 0.0f, 1.0f) * h);
+  float minU = 2, minV = 2, maxU = -1, maxV = -1;
+  for (UINT y = y0; y < y1; ++y)
+    for (UINT x = x0; x < x1; ++x) {
+      if (g_hudMeter.grid[size_t(y) * w + x] <= 77) continue;  // alpha > 0.3
+      const float u = (x + 0.5f) / w, v = (y + 0.5f) / h;
+      bool skipped = false;
+      for (int k = 0; k < skipCount && !skipped; ++k) {
+        const float du = (u - skip[k][0]) * w / h, dv = v - skip[k][1];  // in screen heights
+        skipped = du * du + dv * dv < skipRadius * skipRadius;
+      }
+      if (skipped) continue;
+      minU = std::min(minU, float(x) / w);
+      maxU = std::max(maxU, float(x + 1) / w);
+      minV = std::min(minV, float(y) / h);
+      maxV = std::max(maxV, float(y + 1) / h);
+    }
+  if (maxU < 0) return false;
+  out[0] = minU;
+  out[1] = minV;
+  out[2] = maxU;
+  out[3] = maxV;
+  return true;
 }
 
 float HudAlphaAt(float u, float v) {

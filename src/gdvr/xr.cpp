@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <dxgi1_4.h>
 
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_GRAPHICS_API_D3D11
@@ -25,7 +26,9 @@
 #include "sky.h"
 #include "perf.h"
 #include "log.h"
+#include "mask.h"
 #include "mirror.h"
+#include "pointer.h"
 
 namespace gdvr::xr {
 
@@ -39,9 +42,13 @@ struct Swapchain {
   UINT width = 0, height = 0;
   DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
   std::vector<XrSwapchainImageD3D11KHR> images;
+  bool acquired = false;  // an image acquired but not yet free to write (its wait timed out): retried next frame
+  uint32_t index = 0;
 };
 
 Settings g_settings;
+bool g_captureTimedOut = false;     // this frame: a swapchain image wasn't free in time (frame skipped)
+unsigned long long g_waitTimeouts = 0;
 std::atomic<bool> g_recenterRequested{true};
 std::mutex g_mutex;
 
@@ -81,6 +88,9 @@ float g_eyeTan[2][2] = {};
 uint64_t g_framesSubmitted = 0;
 double g_lastWaitMs = 0;
 std::atomic<bool> g_inWorld{true};  // false on the title screen (no character to follow)
+float g_debugRect[4] = {};          // the F8 window in the HUD image (fractions), while it is shown
+float g_menuContent = -1;           // HUD coverage outside the playing HUD's parts (menu detection)
+double g_debugRectAt = -1e9;        // when it was last drawn
 float g_titleRect[4] = {};          // title screen: the character picture in the menu layer (under g_mutex)
 bool g_titleRectValid = false;
 std::atomic<int> g_dumpEyes{0};  // F11: bit per eye still to dump
@@ -259,13 +269,24 @@ bool CaptureBackBuffer(Swapchain& sc) {
   if (desc.SampleDesc.Count != 1) {
     g_status = "multisampled back buffer is not supported yet (turn off MSAA)";
   } else if (EnsureSwapchain(sc, desc)) {
-    uint32_t index = 0;
+    // Never wait for the runtime without limit: once SteamVR didn't hand an image back and the game hung
+    // there for good (head and camera turning at once). A wait that runs out skips this image (the
+    // compositor shows the last one again) and is tried again next frame; the image stays acquired.
     XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-    wait.timeout = XR_INFINITE_DURATION;
-    if (Check(xrAcquireSwapchainImage(sc.handle, nullptr, &index), "xrAcquireSwapchainImage") &&
-        Check(xrWaitSwapchainImage(sc.handle, &wait), "xrWaitSwapchainImage")) {
-      g_context->CopyResource(sc.images[index].texture, bb);
-      ok = Check(xrReleaseSwapchainImage(sc.handle, nullptr), "xrReleaseSwapchainImage");
+    wait.timeout = 20'000'000;  // 20 ms
+    if (!sc.acquired) sc.acquired = Check(xrAcquireSwapchainImage(sc.handle, nullptr, &sc.index), "xrAcquireSwapchainImage");
+    if (sc.acquired) {
+      const XrResult r = xrWaitSwapchainImage(sc.handle, &wait);
+      if (r == XR_TIMEOUT_EXPIRED) {
+        g_captureTimedOut = true;
+        if (++g_waitTimeouts % 30 == 1) Log("XR: swapchain image not free after 20 ms (%llu times); frame skipped", g_waitTimeouts);
+      } else if (Check(r, "xrWaitSwapchainImage")) {
+        g_context->CopyResource(sc.images[sc.index].texture, bb);
+        ok = Check(xrReleaseSwapchainImage(sc.handle, nullptr), "xrReleaseSwapchainImage");
+        sc.acquired = false;
+      } else {
+        sc.acquired = false;
+      }
     }
   }
   bb->Release();
@@ -329,10 +350,9 @@ mask::HudLook CurrentHudLook() {
   static ULONGLONG lastLog = 0;
   if (GetTickCount64() - lastLog > 5000) {
     lastLog = GetTickCount64();
-    Log("hud: scene brightness %.3f -> daylight %.2f, coverage %.3f (inventory area %.2f, character area %.2f, "
-        "menu %d)%s", g_hudLum, g_hudDayAmount, mask::HudCoverage(),
-        mask::HudRegionCoverage(0.62f, 0.55f, 0.95f, 0.80f), mask::HudRegionCoverage(0.05f, 0.30f, 0.38f, 0.80f),
-        int(g_hudMenuOpen), g_inWorld ? "" : " title screen: black keyed out");
+    Log("hud: scene brightness %.3f -> daylight %.2f, coverage %.3f, menu content %.3f (menu %d)%s", g_hudLum,
+        g_hudDayAmount, mask::HudCoverage(), g_menuContent, int(g_hudMenuOpen),
+        g_inWorld ? "" : " title screen: black keyed out");
   }
   auto mix = [](float a, float b, float t) { return a + (b - a) * t; };
   mask::HudLook look;
@@ -360,19 +380,27 @@ mask::HudLook CurrentHudLook() {
     return engine ? reinterpret_cast<bool (*)()>(GetProcAddress(engine, "?IsGameTimePaused@GAME@@YA_NXZ")) : nullptr;
   }();
   const bool paused = isPaused && isPaused();
-  // The inventory (right) and character (left) windows: big panels where the playing HUD leaves the
-  // screen empty (below the minimap block, above the skill bar). Their total coverage is close to the
-  // playing HUD's, so they are recognised by place.
-  const float invPanel = mask::HudRegionCoverage(0.62f, 0.55f, 0.95f, 0.80f);
-  const float charPanel = mask::HudRegionCoverage(0.05f, 0.30f, 0.38f, 0.80f);
-  const bool panel = invPanel > 0.6f || charPanel > 0.6f;
-  const float coverage = mask::HudCoverage();
-  static bool covered = false;
-  if (coverage >= 0) {
-    if (!covered && coverage > g_settings.hudMenuCoverage) covered = true;
-    if (covered && coverage < g_settings.hudMenuCoverage * 0.85f) covered = false;  // hysteresis
+  // Menus (inventory, character, devotion, skills, map...): what the HUD shows apart from the parts the
+  // playing HUD always has (the bottom bar, the minimap and quest block, the F8 window, the cursor arrows).
+  // The playing HUD leaves that almost empty; a menu fills a good part of it.
+  float skipRects[3][4] = {{0.0f, std::min(0.86f, g_settings.handHudRect[1]), 1.0f, 1.0f},
+                           {1.0f - g_settings.hudSideWidth - 0.02f, 0.0f, 1.0f, g_settings.hudSideHeight + 0.02f},
+                           {0, 0, 0, 0}};
+  if (NowMs() - g_debugRectAt < 500)
+    for (int k = 0; k < 4; ++k) skipRects[2][k] = g_debugRect[k];
+  float skipPts[2][2] = {{0.5f, 0.5f}, {-10, -10}};
+  float cx, cy;
+  if (pointer::CursorFeed(cx, cy) && g_hudChain.width > 0) {
+    skipPts[1][0] = cx / float(g_hudChain.width);
+    skipPts[1][1] = cy / float(g_hudChain.height);
   }
-  g_hudMenuOpen = covered || paused || panel;
+  g_menuContent = mask::HudContentCoverage(skipRects, 3, skipPts, 2, 0.05f);
+  static bool covered = false;
+  if (g_menuContent >= 0) {
+    if (!covered && g_menuContent > g_settings.hudMenuCoverage) covered = true;
+    if (covered && g_menuContent < g_settings.hudMenuCoverage * 0.6f) covered = false;  // hysteresis
+  }
+  g_hudMenuOpen = covered || paused;
   look.sideShift = g_hudMenuOpen ? 0.0f : g_settings.hudSideShift;
   look.sideWidth = g_settings.hudSideWidth;
   look.sideHeight = g_settings.hudSideHeight;
@@ -397,6 +425,7 @@ bool SaveSettingsLocked() {
   put(L"fov_deg", s.fovDeg);
   put(L"level_horizon", s.levelHorizon);
   put(L"recompute_frustum", s.recomputeFrustum);
+  put(L"shared_frustum", s.sharedFrustum);
   put(L"far_plane", s.farPlane);
   put(L"camera_pull", s.cameraPull);
   put(L"contact_shadows_on", s.contactShadowsOn);
@@ -404,6 +433,15 @@ bool SaveSettingsLocked() {
   put(L"contact_softness", s.contactSoftness);
   put(L"contact_size", s.contactSize);
   put(L"title_cutout", s.titleCutout);
+  put(L"hand_hud", s.handHud);
+  put(L"hand_hud_width", s.handHudWidth);
+  put(L"hand_hud_up", s.handHudUp);
+  put(L"hand_hud_back", s.handHudBack);
+  put(L"hand_hud_tilt", s.handHudTiltDeg);
+  put(L"hand_hud_left", s.handHudRect[0]);
+  put(L"hand_hud_top", s.handHudRect[1]);
+  put(L"hand_hud_right", s.handHudRect[2]);
+  put(L"hand_hud_bottom", s.handHudRect[3]);
   put(L"mirror", s.mirror);
   put(L"mirror_fov", s.mirrorFovDeg);
   put(L"sky", s.sky);
@@ -446,7 +484,7 @@ bool SaveSettingsLocked() {
   put(L"hud_side_shift", s.hudSideShift);
   put(L"hud_side_width", s.hudSideWidth);
   put(L"hud_side_height", s.hudSideHeight);
-  put(L"hud_menu_coverage", s.hudMenuCoverage);
+  put(L"hud_menu_content", s.hudMenuCoverage);
   put(L"labels_in_world", s.labelsInWorld);
   put(L"damage_numbers_3d", s.damageNumbers3d);
   put(L"item_labels_3d", s.itemLabels3d);
@@ -487,21 +525,98 @@ void DrawCredit() {
 }
 
 // Ends the frame begun by the previous OnPresent, submitting whatever was captured for it.
+// ---- Hand HUD --------------------------------------------------------------------------------------------
+int OffHand() { return 1 - (g_settings.pointerHand & 1); }
+
+// The bar is on the off hand now: not while a menu is open (menus need the whole floating panel), on the
+// title screen, or while that controller isn't tracked.
+bool HandHudActive() {
+  const float* r = g_settings.handHudRect;
+  return g_settings.hud && g_settings.handHud && g_inWorld && !g_hudMenuOpen && g_handValid[OffHand()] && r[2] > r[0] &&
+         r[3] > r[1] && g_hudChain.width > 0;
+}
+
+// While the bar is on the hand, the floating panel shows only the image rows above it (top edge in place).
+float FloatingCrop() { return HandHudActive() ? std::clamp(g_settings.handHudRect[1], 0.2f, 1.0f) : 1.0f; }
+
+// What the hand panel shows: the bar, grown to the left to include the skill flyouts the game opens there
+// (they would otherwise be cut off). Updated once per frame (UpdateHandRect).
+float g_handRect[4] = {};
+double g_handGrownUntil = 0;
+
+void UpdateHandRect() {
+  const float* bar = g_settings.handHudRect;
+  float rect[4] = {bar[0], bar[1], bar[2], bar[3]};
+  // To the left of the bar, in its own rows (the skill flyouts open there; above the bar is other HUD).
+  // The bar's own dark backing next to it and the game's cursor arrows don't count.
+  const float region[4] = {std::max(0.0f, bar[0] - 0.30f), bar[1], bar[0] - 0.012f, bar[3]};
+  float skip[2][2] = {{0.5f, 0.5f}, {-10, -10}};
+  float cx, cy;
+  if (pointer::CursorFeed(cx, cy) && g_hudChain.width > 0) {
+    skip[1][0] = cx / float(g_hudChain.width);
+    skip[1][1] = cy / float(g_hudChain.height);
+  }
+  float found[4];
+  const double now = NowMs();
+  if (mask::HudContentBounds(region, skip, 2, 0.04f, found)) {
+    rect[0] = std::min(rect[0], found[0] - 0.005f);
+    for (int k = 0; k < 4; ++k) g_handRect[k] = rect[k];
+    g_handGrownUntil = now + 300;  // stays grown a moment (no flicker while it opens and closes)
+    return;
+  }
+  if (now < g_handGrownUntil) return;
+  for (int k = 0; k < 4; ++k) g_handRect[k] = rect[k];
+}
+
+// The hand panel, relative to g_ref: above the off-hand controller, tilted towards the face. The bar keeps its
+// place and size on the hand; when the panel grows (a flyout), it grows around it.
+Pose HandPanelRel(float& width, float& height) {
+  const Pose& h = g_handRel[OffHand()];
+  const float tilt = g_settings.handHudTiltDeg * 3.14159265f / 180.0f;
+  const Quat up{-std::sin(tilt * 0.5f), 0, 0, std::cos(tilt * 0.5f)};  // its face turns from you (+Z) to up (+Y)
+  const float* bar = g_settings.handHudRect;
+  if (g_handRect[2] <= g_handRect[0]) std::copy(bar, bar + 4, g_handRect);  // before the first frame
+  const float* r = g_handRect;
+  const float W = float(g_hudChain.width), H = float(g_hudChain.height);
+  const float metresPerPx = g_settings.handHudWidth / std::max(1.0f, (bar[2] - bar[0]) * W);
+  width = (r[2] - r[0]) * W * metresPerPx;
+  height = (r[3] - r[1]) * H * metresPerPx;
+  // Panel centre relative to the bar's centre (image y points down).
+  const float dx = ((r[0] + r[2]) - (bar[0] + bar[2])) * 0.5f * W * metresPerPx;
+  const float dy = -((r[1] + r[3]) - (bar[1] + bar[3])) * 0.5f * H * metresPerPx;
+  const Quat q = h.orientation * up;
+  return {q, h.position + Rotate(h.orientation, {0, g_settings.handHudUp, g_settings.handHudBack}) + Rotate(q, {dx, dy, 0})};
+}
+
 void EndFrame() {
   XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
   XrCompositionLayerQuad hudQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  XrCompositionLayerQuad handQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
   XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   XrCompositionLayerProjectionView pv[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
                                          {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
   std::vector<XrCompositionLayerBaseHeader*> layers;
 
   if (g_frameState.shouldRender && g_haveRef) {
-    const bool stereo = g_settings.mode == Mode::Stereo && g_viewsValid && g_eyeCaptured[0] && g_eyeCaptured[1];
+    // A frame whose eye images couldn't be handed over in time (CaptureBackBuffer) shows the last ones again,
+    // with the head pose they were rendered for (the swapchains still hold them), instead of a black frame.
+    static XrPosef lastPose[2];
+    static XrFovf lastFov[2];
+    static bool lastValid = false;
+    const bool fresh = g_settings.mode == Mode::Stereo && g_viewsValid && g_eyeCaptured[0] && g_eyeCaptured[1];
+    const bool again = !fresh && g_captureTimedOut && lastValid && g_settings.mode == Mode::Stereo;
+    const bool stereo = fresh || again;
+    if (!stereo) lastValid = false;
     if (stereo) {
       for (int i = 0; i < 2; ++i) {
-        pv[i].pose = g_views[i].pose;
-        pv[i].fov = {-std::atan(g_eyeTan[i][0]), std::atan(g_eyeTan[i][0]), std::atan(g_eyeTan[i][1]),
-                     -std::atan(g_eyeTan[i][1])};
+        if (fresh) {
+          lastPose[i] = g_views[i].pose;
+          lastFov[i] = {-std::atan(g_eyeTan[i][0]), std::atan(g_eyeTan[i][0]), std::atan(g_eyeTan[i][1]),
+                        -std::atan(g_eyeTan[i][1])};
+          lastValid = true;
+        }
+        pv[i].pose = lastPose[i];
+        pv[i].fov = lastFov[i];
         pv[i].subImage.swapchain = g_eyeChains[i].handle;
         pv[i].subImage.imageRect = {{0, 0}, {int32_t(g_eyeChains[i].width), int32_t(g_eyeChains[i].height)}};
       }
@@ -530,12 +645,31 @@ void EndFrame() {
           hudQuad.space = g_localSpace;
           hudQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
           hudQuad.subImage.swapchain = g_hudChain.handle;
-          hudQuad.subImage.imageRect = {{0, 0}, {int32_t(g_hudChain.width), int32_t(g_hudChain.height)}};
-          hudQuad.pose = ToXr({yaw * pitch, g_ref.position + Rotate(yaw, {0, -g_settings.hudDown, -g_settings.hudDistance})});
-          hudQuad.size = {g_settings.hudWidth,
-                          g_settings.hudWidth * float(g_hudChain.height) / float(std::max(1u, g_hudChain.width))};
+          // The floating panel (without the bottom bar while it is on the hand; its top edge stays in place).
+          const float crop = FloatingCrop();
+          const float fullH = g_settings.hudWidth * float(g_hudChain.height) / float(std::max(1u, g_hudChain.width));
+          const Vec3 shift = Rotate(pitch, {0, (fullH - fullH * crop) * 0.5f, 0});
+          hudQuad.subImage.imageRect = {{0, 0}, {int32_t(g_hudChain.width), int32_t(float(g_hudChain.height) * crop)}};
+          hudQuad.pose = ToXr({yaw * pitch, g_ref.position + Rotate(yaw, Vec3{0, -g_settings.hudDown, -g_settings.hudDistance} + shift)});
+          hudQuad.size = {g_settings.hudWidth, fullH * crop};
           layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&hudQuad));
           hudShown = true;
+          // The bottom bar on the off hand: the same HUD image, just its rectangle.
+          if (HandHudActive()) {
+            UpdateHandRect();
+            float w, h;
+            const Pose rel = HandPanelRel(w, h);
+            const float* r = g_handRect;
+            handQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            handQuad.space = g_localSpace;
+            handQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            handQuad.subImage.swapchain = g_hudChain.handle;
+            handQuad.subImage.imageRect = {{int32_t(r[0] * g_hudChain.width), int32_t(r[1] * g_hudChain.height)},
+                                           {int32_t((r[2] - r[0]) * g_hudChain.width), int32_t((r[3] - r[1]) * g_hudChain.height)}};
+            handQuad.pose = ToXr({g_ref.orientation * rel.orientation, g_ref.position + Rotate(g_ref.orientation, rel.position)});
+            handQuad.size = {w, h};
+            layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&handQuad));
+          }
         }
       }
       // Desktop mirror: the window shows the left eye with the HUD over it (the headset already has both).
@@ -544,7 +678,8 @@ void EndFrame() {
         mirror::Compose(g_device, g_context, bb, g_eyeTan[0][0], g_eyeTan[0][1], g_settings.mirrorFovDeg, hudShown);
         bb->Release();
       }
-    } else if (g_settings.mode != Mode::Off && (sky::OnHudFrame(g_gameSwapChain), CaptureBackBuffer(g_screenChain))) {
+    } else if (!g_captureTimedOut && g_settings.mode != Mode::Off &&
+               (sky::OnHudFrame(g_gameSwapChain), CaptureBackBuffer(g_screenChain))) {
       // Screen mode, or stereo with nothing rendered this frame (menus, loading): flat screen.
       const Quat yaw = g_ref.orientation;
       quad.space = g_localSpace;
@@ -583,6 +718,7 @@ void BeginFrame() {
   g_frameBegun = true;
   g_eyeCaptured[0] = g_eyeCaptured[1] = false;
   g_hudPrepared = false;
+  g_captureTimedOut = false;
 
   // Head pose (for recentring) and eye views for this frame's predicted display time.
   XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
@@ -628,6 +764,31 @@ bool SaveSettings() {
   return SaveSettingsLocked();
 }
 
+// Every 10 s: GPU memory the game uses against what Windows lets it have (a leak or running out of video
+// memory shows up as a climb towards the budget), and whether the device was lost.
+void LogGpuMemory() {
+  static ULONGLONG last = 0;
+  if (!g_device || GetTickCount64() - last < 10000) return;
+  last = GetTickCount64();
+  IDXGIDevice* dxgi = nullptr;
+  IDXGIAdapter* adapter = nullptr;
+  IDXGIAdapter3* adapter3 = nullptr;
+  if (SUCCEEDED(g_device->QueryInterface(IID_PPV_ARGS(&dxgi))) && SUCCEEDED(dxgi->GetAdapter(&adapter)) &&
+      SUCCEEDED(adapter->QueryInterface(IID_PPV_ARGS(&adapter3)))) {
+    DXGI_QUERY_VIDEO_MEMORY_INFO local{}, shared{};
+    adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local);
+    adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &shared);
+    Log("gpu memory: %llu of %llu MB video memory in use (shared %llu MB)%s", local.CurrentUsage >> 20,
+        local.Budget >> 20, shared.CurrentUsage >> 20,
+        local.CurrentUsage > local.Budget * 9 / 10 ? "  NEAR THE LIMIT" : "");
+  }
+  if (adapter3) adapter3->Release();
+  if (adapter) adapter->Release();
+  if (dxgi) dxgi->Release();
+  const HRESULT removed = g_device->GetDeviceRemovedReason();
+  if (removed != S_OK) Log("gpu: device lost (reason 0x%08lX)", static_cast<unsigned long>(removed));
+}
+
 void OnPresent(IDXGISwapChain* swapChain) {
   d3dtrace::EndUi();
   std::lock_guard lock(g_mutex);
@@ -636,6 +797,7 @@ void OnPresent(IDXGISwapChain* swapChain) {
     if (FAILED(swapChain->GetDevice(IID_PPV_ARGS(&g_device)))) return;
     g_device->GetImmediateContext(&g_context);
   }
+  LogGpuMemory();
 
   // Hotkeys: F7 cycles the mask (on -> distance rings -> off), F9 cycles Off -> Screen -> Stereo,
   // F10 recentres.
@@ -729,19 +891,45 @@ bool HudPanelRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distanc
   if (!g_settings.hud) return false;
   const float tilt = -g_settings.hudTiltDeg * 3.14159265f / 180.0f;
   const Quat pitch{std::sin(tilt * 0.5f), 0, 0, std::cos(tilt * 0.5f)};
-  const Vec3 centre{0, -g_settings.hudDown, -g_settings.hudDistance};
   const Vec3 axisX = Rotate(pitch, {1, 0, 0}), axisY = Rotate(pitch, {0, 1, 0}), normal = Rotate(pitch, {0, 0, 1});
   const float width = g_settings.hudWidth;
-  const float height = width * float(g_hudChain.height) / float(std::max(1u, g_hudChain.width));
+  const float fullH = width * float(g_hudChain.height) / float(std::max(1u, g_hudChain.width));
+  const float crop = FloatingCrop(), height = fullH * crop;  // as drawn (EndFrame)
+  const Vec3 centre = Vec3{0, -g_settings.hudDown, -g_settings.hudDistance} + axisY * ((fullH - height) * 0.5f);
   const float denom = Dot(normal, dirRel);
   if (std::fabs(denom) < 1e-6f) return false;
   const float t = Dot(normal, centre - originRel) / denom;
   if (t <= 0) return false;
   const Vec3 local = originRel + dirRel * t - centre;
   u = Dot(local, axisX) / width + 0.5f;
-  v = 0.5f - Dot(local, axisY) / height;
+  v = (0.5f - Dot(local, axisY) / height) * crop;  // in the whole HUD image
   distance = t;
-  return u >= 0 && u <= 1 && v >= 0 && v <= 1;
+  return u >= 0 && u <= 1 && v >= 0 && v <= crop;
+}
+
+bool HandHudRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distance) {
+  std::lock_guard lock(g_mutex);
+  if (!HandHudActive()) return false;
+  float w, h;
+  const Pose p = HandPanelRel(w, h);
+  const Vec3 axisX = Rotate(p.orientation, {1, 0, 0}), axisY = Rotate(p.orientation, {0, 1, 0});
+  const Vec3 normal = Rotate(p.orientation, {0, 0, 1});
+  const float denom = Dot(normal, dirRel);
+  if (std::fabs(denom) < 1e-6f) return false;
+  const float t = Dot(normal, p.position - originRel) / denom;
+  if (t <= 0) return false;
+  const Vec3 local = originRel + dirRel * t - p.position;
+  const float lu = Dot(local, axisX) / w + 0.5f, lv = 0.5f - Dot(local, axisY) / h;
+  if (lu < 0 || lu > 1 || lv < 0 || lv > 1) return false;
+  const float* r = g_handRect;
+  // Over the grown part (a flyout) only where it shows something; the bar itself always catches the laser.
+  const float* bar = g_settings.handHudRect;
+  const float fu = r[0] + lu * (r[2] - r[0]), fv = r[1] + lv * (r[3] - r[1]);
+  if (fu < bar[0] && mask::HudAlphaAt(fu, fv) < 0.08f) return false;
+  u = r[0] + lu * (r[2] - r[0]);  // in the whole HUD image
+  v = r[1] + lv * (r[3] - r[1]);
+  distance = t;
+  return true;
 }
 
 bool HudSolidAt(float u, float v, bool sticky) {
@@ -891,6 +1079,20 @@ void RequestEyeDump() { g_dumpEyes = 7; }
 
 void SetInWorld(bool inWorld) { g_inWorld = inWorld; }
 
+long DeviceRemovedReason() {
+  ID3D11Device* device = g_device;  // no lock: called by the freeze watchdog while the game may hold it
+  return device ? long(device->GetDeviceRemovedReason()) : 0;
+}
+
+void SetDebugWindowRect(float x0, float y0, float x1, float y1) {
+  std::lock_guard lock(g_mutex);
+  g_debugRect[0] = x0 - 0.01f;
+  g_debugRect[1] = y0 - 0.01f;
+  g_debugRect[2] = x1 + 0.01f;
+  g_debugRect[3] = y1 + 0.01f;
+  g_debugRectAt = NowMs();
+}
+
 bool TitleCutout(float rect[4]) {
   std::lock_guard lock(g_mutex);
   if (!g_titleRectValid || g_inWorld) return false;
@@ -941,9 +1143,9 @@ void DrawDebugUI() {
     ImGui::SameLine();
     ImGui::Checkbox("3D item names", &g_settings.itemLabels3d);
     ImGui::Checkbox("Labels over their monsters/items (health bars, names)", &g_settings.labelsInWorld);
-    ImGui::Text("HUD coverage %.3f  ->  %s", mask::HudCoverage(),
+    ImGui::Text("Menu content %.3f  ->  %s", g_menuContent,
                 g_hudMenuOpen ? "menu open (block in place)" : "no menu");
-    ImGui::SliderFloat("Menu open above", &g_settings.hudMenuCoverage, 0.05f, 0.8f, "%.2f");
+    ImGui::SliderFloat("Menu open above (menu content)", &g_settings.hudMenuCoverage, 0.02f, 0.5f, "%.2f");
     if (ImGui::Button("Recentre view")) g_recenterRequested = true;
     ImGui::SameLine();
     if (ImGui::Button("Reset placement")) {
@@ -1025,6 +1227,15 @@ void DrawDebugUI() {
     ImGui::SliderFloat("Backdrop brightness", &g_settings.skyBackdropBrightness, 0.0f, 2.0f, "%.2f");
   }
 
+  if (ImGui::CollapsingHeader("Hand HUD (off hand)")) {
+    ImGui::Checkbox("Bottom bar on the off hand (the hand without the laser)", &g_settings.handHud);
+    ImGui::SliderFloat("Hand HUD size (m wide)", &g_settings.handHudWidth, 0.12f, 0.6f, "%.2f");
+    ImGui::SliderFloat("Above the controller (m)", &g_settings.handHudUp, -0.05f, 0.25f, "%.2f");
+    ImGui::SliderFloat("Towards you (m)", &g_settings.handHudBack, -0.15f, 0.25f, "%.2f");
+    ImGui::SliderFloat("Tilt up (deg)", &g_settings.handHudTiltDeg, -30.0f, 90.0f, "%.0f");
+    ImGui::SliderFloat4("Bar in the HUD L T R B", g_settings.handHudRect, 0.0f, 1.0f, "%.2f");
+  }
+
   if (ImGui::CollapsingHeader("Desktop mirror (recording)")) {
     ImGui::Checkbox("Show the headset view in the game window (left eye + HUD)", &g_settings.mirror);
     ImGui::Checkbox("Title screen: character stands in the scene", &g_settings.titleCutout);
@@ -1034,6 +1245,7 @@ void DrawDebugUI() {
   if (ImGui::CollapsingHeader("World")) {
     ImGui::SliderFloat("World scale", &g_settings.worldScale, 4.0f, 40.0f, "%.1f");
     ImGui::SliderFloat("Camera closer (units)", &g_settings.cameraPull, 0.0f, 20.0f, "%.1f");
+    ImGui::Checkbox("One culling view for both eyes (steadier grass, fewer rebuilds)", &g_settings.sharedFrustum);
     ImGui::Checkbox("Fade mask", &g_settings.maskEnabled);
     ImGui::SliderFloat("Fade starts (units)", &g_settings.maskInner, 10.0f, 80.0f, "%.0f");
     ImGui::SliderFloat("Fully dark at (units)", &g_settings.maskOuter, 15.0f, 90.0f, "%.0f");

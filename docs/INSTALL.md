@@ -34,7 +34,8 @@ Library > Browse**, pick `gdvr_launch.exe`, and do step 4 above.
 - Puts one file, `dinput8.dll`, into the game's `x64` folder. It stays dormant when you start Grim Dawn
   normally; only the VR launcher turns the mod on.
 - Backs up your saves to `%LOCALAPPDATA%\gdvr\save_backups` (the last 10).
-- Keeps separate game settings for VR (windowed 2560x1440, no depth of field, no camera shake...):
+- Keeps separate game settings for VR (windowed 2560x1440, no depth of field, no camera shake, no detail
+  objects - with VR's wide view they can make the graphics card hang):
   `options_vr.txt` is swapped in while VR runs and your normal `options.txt` is put back when you quit.
 - Starts SteamVR, then the game.
 

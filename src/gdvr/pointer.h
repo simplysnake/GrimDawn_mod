@@ -38,6 +38,9 @@ void TapKey(int dik);
 // True while stereo frames keep updating the pointer.
 bool Live();
 
+// Where the mod last put the game's cursor (client pixels); false while it doesn't drive it.
+bool CursorFeed(float& x, float& y);
+
 void DrawDebugUI();
 int InFlight();
 

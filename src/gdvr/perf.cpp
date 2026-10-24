@@ -61,6 +61,8 @@ Stage g_stages[] = {
     {"Def.SceneGlow", "?RenderSceneGlow@GraphicsDeferredRenderer@GAME@@AEAAXAEBVGraphicsScene@2@@Z"},
     {"Def.Fog", "?RenderFog@GraphicsDeferredRenderer@GAME@@AEAAXAEBVGraphicsScene@2@@Z"},
     {"Def.FinalScene", "?RenderFinalScene@GraphicsDeferredRenderer@GAME@@UEAAXAEAVGraphicsScene@2@@Z"},
+    // Grass rebuilt for terrain patches (it churned when the two eyes culled differently).
+    {"SetupGrass", "?SetupGrassGeometry@GrassObject@GAME@@MEAAXPEAVTerrainBase@2@AEBV?$vector@I@mem@@HHHHPEAVTerrainPatch@2@@Z"},
     {"Def.Stencil", "?RenderStencilBuffer@GraphicsDeferredRenderer@GAME@@AEAAXAEBVViewport@2@HAEBVColor@2@@Z"},
 };
 constexpr int kStageCount = int(std::size(g_stages));

@@ -16,6 +16,7 @@ struct Settings {
   float fovDeg = 0.0f;          // vertical FOV for each eye; 0 = fit the headset's lenses automatically
   bool levelHorizon = true;     // map real "straight ahead" to the game's horizon, not its tilted camera
   bool recomputeFrustum = true; // cull with the eye camera's own frustum (fixes holes when looking around)
+  bool sharedFrustum = true;    // ...one shared by both eyes (steadier: no per-eye grass rebuilding)
   float screenDistance = 2.0f;  // Screen mode: metres in front of you
   float screenWidth = 3.0f;     // Screen mode: metres wide
   float cameraPull = 6.0f;       // game units the viewpoint moves towards the character (closer zoom range)
@@ -23,6 +24,14 @@ struct Settings {
   float contactShadows = 0.6f;   // darkening where grass, rocks and characters meet the ground (0 = off)
   float contactSoftness = 1.5f;  // ...how soft (blur level)
   float contactSize = 1.0f;      // ...how far from a contact the darkening reaches (game units)
+  // Hand HUD: the bottom bar (globes, skill bar, XP) on the off hand (the one without the laser), above
+  // the controller and tilted towards the face; the laser hand clicks it. Off while a menu is open.
+  bool handHud = true;
+  float handHudWidth = 0.375f;  // metres (the bar's width; the panel grows for flyouts)
+  float handHudUp = 0.06f;      // metres above the controller
+  float handHudBack = 0.03f;    // metres towards you
+  float handHudTiltDeg = 45.0f; // 0 = facing you, 90 = facing up
+  float handHudRect[4] = {0.31f, 0.87f, 0.69f, 1.0f};  // the bar in the HUD image (left, top, right, bottom)
   bool titleCutout = true;       // title screen: the character picture stands in the 3D scene
   bool mirror = true;            // the game window shows the left eye with the HUD (for recording/streaming)
   float mirrorFovDeg = 90.0f;    // ...cropped to this horizontal field of view
@@ -61,7 +70,7 @@ struct Settings {
   float hudSideShift = 0.0f;    // how far left, as a fraction of the HUD width (0 = where the game draws it)
   float hudSideWidth = 0.22f;   // the block's size as fractions of the HUD image, from the top-right corner
   float hudSideHeight = 0.55f;
-  float hudMenuCoverage = 0.25f; // HUD coverage above this = a menu is open: the block goes back to its place
+  float hudMenuCoverage = 0.10f;  // HUD content outside the playing HUD's parts above which a menu is open
   bool hudSideOutline = false;
   bool pointer = true;           // controller laser pointer
   int pointerHand = 1;           // 0 left, 1 right
@@ -102,6 +111,9 @@ bool HandAim(int hand, Pose& pose);
 // Where a ray (recentred space, unit direction) hits the HUD panel: image fractions and distance (m).
 bool HudPanelRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distance);
 
+// The same for the hand HUD (the bottom bar on the off hand), when it is shown; u, v in the whole HUD image.
+bool HandHudRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distance);
+
 // Whether the HUD shows something at this image position that should catch the pointer (`sticky`:
 // the pointer is already on the HUD, so fainter parts count too). The whole panel while a menu is open.
 bool HudSolidAt(float u, float v, bool sticky = false);
@@ -122,6 +134,12 @@ bool StereoFrameActive();
 
 // Whether the world being rendered has a character in it (false on the title screen). From the renderer.
 void SetInWorld(bool inWorld);
+
+// The game device's GetDeviceRemovedReason (0: fine). Lock-free, for the freeze watchdog.
+long DeviceRemovedReason();
+
+// Where the F8 window is (fractions of the game image), each frame it is drawn: left out of menu detection.
+void SetDebugWindowRect(float x0, float y0, float x1, float y1);
 
 // Title screen: the character picture's rect in the menu layer (fractions u0 v0 u1 v1), if found.
 bool TitleCutout(float rect[4]);

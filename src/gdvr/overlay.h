@@ -39,6 +39,9 @@ void DrawWorld(const WorldText* texts, int textCount, const Polyline* lines, int
 // The game's window (null until the first frame).
 HWND GameWindow();
 
+// GetTickCount64() when the game last presented a frame (0: not yet).
+unsigned long long LastPresentTick();
+
 // Number of threads currently inside one of our swapchain detours.
 int InFlight();
 

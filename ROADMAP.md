@@ -115,4 +115,8 @@ One pipeline: a point in the 3D world becomes the game's mouse position. Sources
 ## Known limitations
 
 - Native 90 Hz is unrealistic (~10 ms per frame is game logic/HUD); target 45 fps + SteamVR motion smoothing.
-- Grass and rocks meet the ground with hard edges (engine soft blending is off in VR).
+- Grass and rocks meet the ground with hard edges (engine soft blending is off in VR); contact shadows
+  (F8 > World) stand in for it.
+- The game's "Detail Objects" (ground clutter) make the GPU hang with VR's wide view (device hung/removed after
+  minutes, worst when new ground streams in): off in the VR settings. A capped clutter distance could bring
+  some of it back.

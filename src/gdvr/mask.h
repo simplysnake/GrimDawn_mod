@@ -92,6 +92,13 @@ float HudCoverage();
 // HUD opacity around an image position (fractions 0..1) from a 160x90 map read back every few
 // frames; -1 if not measured yet.
 float HudAlphaAt(float u, float v);
+// Bounding box (fractions) of what the HUD shows inside `region` (u0 v0 u1 v1), leaving out circles of
+// `skipRadius` (screen heights) around the `skip` points (u, v); false if nothing.
+// Share (0..1) of the HUD image where something is drawn, leaving out the `skipRects` (u0 v0 u1 v1) and circles
+// of `skipRadius` (screen heights) around the `skip` points; -1 if not measured yet.
+float HudContentCoverage(const float (*skipRects)[4], int rectCount, const float (*skip)[2], int skipCount,
+                         float skipRadius);
+bool HudContentBounds(const float region[4], const float (*skip)[2], int skipCount, float skipRadius, float out[4]);
 // Share (0..1) of a HUD region (fractions of the image) where something is drawn, or -1 if not measured yet.
 float HudRegionCoverage(float u0, float v0, float u1, float v1);
 

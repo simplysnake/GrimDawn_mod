@@ -29,6 +29,8 @@ void Teardown();
 
 namespace {
 
+std::atomic<unsigned long long> g_lastPresent{0};  // GetTickCount64() of the last frame shown (freeze watchdog)
+
 using PresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
 using ResizeBuffersFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
 
@@ -164,6 +166,7 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swapChain, UINT syncInterv
 
   xr::OnPresent(swapChain);
   if (g_device) perf::OnPresent(g_device, g_context, xr::LastWaitMs());
+  g_lastPresent = GetTickCount64();
   return g_origPresent(swapChain, syncInterval, flags);
 }
 
@@ -239,6 +242,8 @@ void DrawWorld(const WorldText* texts, int textCount, const Polyline* lines, int
 }
 
 HWND GameWindow() { return g_window; }
+
+unsigned long long LastPresentTick() { return g_lastPresent.load(); }
 
 void DrawWorldText(const WorldText* items, int count) { DrawWorld(items, count, nullptr, 0); }
 
