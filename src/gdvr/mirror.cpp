@@ -15,10 +15,15 @@ namespace gdvr::mirror {
 
 namespace {
 
-// Full-screen triangle. PSEye: the eye image through a centred crop; PSHud: the HUD layer (its colour is
-// already scaled by its opacity, so it blends as premultiplied alpha).
+// VS + PSEye: full-screen triangle, the eye image through a centred crop. VSPanel + PSHud: one HUD panel as
+// a quad whose corners arrive in clip space (behind the eye is clipped by the hardware); the HUD's colour is
+// already scaled by its opacity, so it blends as premultiplied alpha.
 constexpr char kShader[] = R"(
-cbuffer Crop : register(b0) { float4 crop; };  // xy: centre-relative scale of the eye image's uv
+cbuffer Mirror : register(b0) {
+  float4 crop;        // xy: centre-relative scale of the eye image's uv
+  float4 corner[4];   // panel corners in clip space: top left, top right, bottom left, bottom right
+  float4 uvRect;      // the panel's rectangle of the HUD image
+};
 Texture2D tex : register(t0);
 SamplerState samp : register(s0);
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -28,13 +33,26 @@ VSOut VS(uint id : SV_VertexID) {
   o.pos = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1);
   return o;
 }
+VSOut VSPanel(uint id : SV_VertexID) {
+  VSOut o;
+  o.pos = corner[id];
+  o.uv = float2(id & 1 ? uvRect.z : uvRect.x, id & 2 ? uvRect.w : uvRect.y);
+  return o;
+}
 float4 PSEye(VSOut i) : SV_Target {
   return float4(tex.SampleLevel(samp, 0.5 + (i.uv - 0.5) * crop.xy, 0).rgb, 1);
 }
-float4 PSHud(VSOut i) : SV_Target { return tex.Load(int3(i.pos.xy, 0)); }
+float4 PSHud(VSOut i) : SV_Target { return tex.SampleLevel(samp, i.uv, 0); }
 )";
 
+struct Constants {
+  float crop[4];
+  float corner[4][4];
+  float uvRect[4];
+};
+
 ID3D11VertexShader* g_vs = nullptr;
+ID3D11VertexShader* g_vsPanel = nullptr;
 ID3D11PixelShader* g_psEye = nullptr;
 ID3D11PixelShader* g_psHud = nullptr;
 ID3D11Buffer* g_cb = nullptr;
@@ -67,19 +85,22 @@ void Release(Copy& c) {
 bool CreatePipeline(ID3D11Device* device) {
   if (g_vs) return true;
   if (g_failed) return false;
-  ID3DBlob *vs = nullptr, *eye = nullptr, *hud = nullptr, *err = nullptr;
+  ID3DBlob *vs = nullptr, *panel = nullptr, *eye = nullptr, *hud = nullptr, *err = nullptr;
   bool ok = SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mirror", nullptr, nullptr, "VS", "vs_5_0", 0, 0, &vs, &err)) &&
+            SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mirror", nullptr, nullptr, "VSPanel", "vs_5_0", 0, 0, &panel, &err)) &&
             SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mirror", nullptr, nullptr, "PSEye", "ps_5_0", 0, 0, &eye, &err)) &&
             SUCCEEDED(D3DCompile(kShader, sizeof(kShader) - 1, "gdvr_mirror", nullptr, nullptr, "PSHud", "ps_5_0", 0, 0, &hud, &err));
   if (!ok && err) Log("mirror: shader: %s", static_cast<const char*>(err->GetBufferPointer()));
   ok = ok && SUCCEEDED(device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &g_vs)) &&
+       SUCCEEDED(device->CreateVertexShader(panel->GetBufferPointer(), panel->GetBufferSize(), nullptr, &g_vsPanel)) &&
        SUCCEEDED(device->CreatePixelShader(eye->GetBufferPointer(), eye->GetBufferSize(), nullptr, &g_psEye)) &&
        SUCCEEDED(device->CreatePixelShader(hud->GetBufferPointer(), hud->GetBufferSize(), nullptr, &g_psHud));
   SafeRelease(vs);
+  SafeRelease(panel);
   SafeRelease(eye);
   SafeRelease(hud);
   SafeRelease(err);
-  D3D11_BUFFER_DESC bd{16, D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
+  D3D11_BUFFER_DESC bd{sizeof(Constants), D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
   D3D11_SAMPLER_DESC sd{};
   sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
   sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -98,6 +119,7 @@ bool CreatePipeline(ID3D11Device* device) {
   D3D11_RASTERIZER_DESC rd{};
   rd.FillMode = D3D11_FILL_SOLID;
   rd.CullMode = D3D11_CULL_NONE;
+  rd.DepthClipEnable = TRUE;  // clips the part of a panel that is behind the eye
   D3D11_DEPTH_STENCIL_DESC dd{};
   ok = ok && SUCCEEDED(device->CreateBuffer(&bd, nullptr, &g_cb)) && SUCCEEDED(device->CreateSamplerState(&sd, &g_sampler)) &&
        SUCCEEDED(device->CreateBlendState(&opaque, &g_opaque)) && SUCCEEDED(device->CreateBlendState(&premul, &g_premul)) &&
@@ -154,6 +176,7 @@ struct Saved {
   ID3D11ShaderResourceView* srv = nullptr;
   ID3D11SamplerState* sampler = nullptr;
   ID3D11Buffer* cb = nullptr;
+  ID3D11Buffer* vscb = nullptr;
   ID3D11InputLayout* layout = nullptr;
   D3D11_PRIMITIVE_TOPOLOGY topology{};
 
@@ -168,6 +191,7 @@ struct Saved {
     c->PSGetShaderResources(0, 1, &srv);
     c->PSGetSamplers(0, 1, &sampler);
     c->PSGetConstantBuffers(0, 1, &cb);
+    c->VSGetConstantBuffers(0, 1, &vscb);
     c->IAGetInputLayout(&layout);
     c->IAGetPrimitiveTopology(&topology);
   }
@@ -182,9 +206,10 @@ struct Saved {
     c->PSSetShaderResources(0, 1, &srv);
     c->PSSetSamplers(0, 1, &sampler);
     c->PSSetConstantBuffers(0, 1, &cb);
+    c->VSSetConstantBuffers(0, 1, &vscb);
     c->IASetInputLayout(layout);
     c->IASetPrimitiveTopology(topology);
-    for (IUnknown* p : std::initializer_list<IUnknown*>{rtv, dsv, blend, depth, raster, vs, ps, srv, sampler, cb, layout})
+    for (IUnknown* p : std::initializer_list<IUnknown*>{rtv, dsv, blend, depth, raster, vs, ps, srv, sampler, cb, vscb, layout})
       if (p) p->Release();
   }
 };
@@ -197,10 +222,10 @@ void KeepEye(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* ba
 
 void Invalidate() { g_haveEye = false; }
 
-void Compose(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* backBuffer, float tanX, float tanY,
-             float fovDeg, bool withHud) {
+void Compose(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* backBuffer, const Pose& eye, float tanX,
+             float tanY, float fovDeg, const Panel* panels, int panelCount) {
   if (!g_haveEye || tanX <= 0 || tanY <= 0 || !CreatePipeline(device)) return;
-  if (withHud && !CopyOf(device, ctx, backBuffer, g_hud)) withHud = false;
+  if (panelCount > 0 && !CopyOf(device, ctx, backBuffer, g_hud)) panelCount = 0;
   D3D11_TEXTURE2D_DESC bd;
   backBuffer->GetDesc(&bd);
   ID3D11RenderTargetView* rtv = nullptr;
@@ -210,12 +235,17 @@ void Compose(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* ba
   float t = std::tan(std::clamp(fovDeg, 30.0f, 150.0f) * 0.5f * 3.14159265f / 180.0f);
   const float aspect = float(bd.Height) / float(std::max(1u, bd.Width));
   t = std::min({t, tanX, tanY / aspect});
-  const float crop[4] = {t / tanX, t * aspect / tanY, 0, 0};
-  D3D11_MAPPED_SUBRESOURCE m;
-  if (SUCCEEDED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
-    std::memcpy(m.pData, crop, sizeof(crop));
+  Constants k{};
+  k.crop[0] = t / tanX;
+  k.crop[1] = t * aspect / tanY;
+  auto upload = [&] {
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
+    std::memcpy(m.pData, &k, sizeof(k));
     ctx->Unmap(g_cb, 0);
-  }
+    return true;
+  };
+  upload();
 
   Saved saved;
   saved.Save(ctx);
@@ -229,16 +259,34 @@ void Compose(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* ba
   ctx->VSSetShader(g_vs, nullptr, 0);
   ctx->PSSetSamplers(0, 1, &g_sampler);
   ctx->PSSetConstantBuffers(0, 1, &g_cb);
+  ctx->VSSetConstantBuffers(0, 1, &g_cb);
 
   ctx->OMSetBlendState(g_opaque, nullptr, 0xFFFFFFFF);
   ctx->PSSetShader(g_psEye, nullptr, 0);
   ctx->PSSetShaderResources(0, 1, &g_eye.srv);
   ctx->Draw(3, 0);
-  if (withHud) {
+  if (panelCount > 0) {
+    // Each panel's corners seen from the eye (OpenXR: -Z ahead), straight into the window's clip space:
+    // x / (-z) / t across, y / (-z) / (t * aspect) up, w = -z.
+    const Quat toEye = Conjugate(eye.orientation);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    ctx->VSSetShader(g_vsPanel, nullptr, 0);
     ctx->OMSetBlendState(g_premul, nullptr, 0xFFFFFFFF);
     ctx->PSSetShader(g_psHud, nullptr, 0);
     ctx->PSSetShaderResources(0, 1, &g_hud.srv);
-    ctx->Draw(3, 0);
+    for (int i = 0; i < panelCount; ++i) {
+      const Panel& p = panels[i];
+      for (int c = 0; c < 4; ++c) {
+        const Vec3 local{(c & 1 ? 0.5f : -0.5f) * p.width, (c & 2 ? -0.5f : 0.5f) * p.height, 0};
+        const Vec3 e = Rotate(toEye, p.pose.position + Rotate(p.pose.orientation, local) - eye.position);
+        k.corner[c][0] = e.x / t;
+        k.corner[c][1] = e.y / (t * aspect);
+        k.corner[c][2] = -0.5f * e.z;
+        k.corner[c][3] = -e.z;
+      }
+      std::memcpy(k.uvRect, p.uv, sizeof(k.uvRect));
+      if (upload()) ctx->Draw(4, 0);
+    }
   }
   ID3D11ShaderResourceView* none = nullptr;
   ctx->PSSetShaderResources(0, 1, &none);
@@ -251,6 +299,7 @@ void Shutdown() {
   Release(g_hud);
   g_haveEye = false;
   SafeRelease(g_vs);
+  SafeRelease(g_vsPanel);
   SafeRelease(g_psEye);
   SafeRelease(g_psHud);
   SafeRelease(g_cb);

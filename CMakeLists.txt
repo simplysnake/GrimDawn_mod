@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(gdvr VERSION 0.3.1 LANGUAGES C CXX)
+project(gdvr VERSION 0.3.2 LANGUAGES C CXX)
 
 # Development builds (default) log into the repo and keep the diagnostics; release builds (package.ps1)
 # use only the install folder and %LOCALAPPDATA%\gdvr.

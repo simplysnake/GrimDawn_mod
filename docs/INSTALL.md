@@ -66,9 +66,11 @@ Keyboard: **F8** settings window, **F9** VR mode (off, flat screen, stereo), **F
 ## Recording and streaming
 
 The game window on your monitor shows what you see in the headset: the left eye, cropped to a normal
-field of view, with the HUD over it. Record or stream that window with any tool (OBS "Game Capture" or
+field of view, with the HUD panels floating where they are in the headset (including the one on your hand). Record or stream that window with any tool (OBS "Game Capture" or
 "Window Capture", Steam recording, ShadowPlay...). In the **F8** window, **Desktop mirror** turns it off
-and sets its field of view.
+and sets its field of view. If a recording ever shows something other than the window (a stretched or
+HUD-only picture), switch OBS to **Window Capture** (capture method "Windows 10"), which records exactly
+what the window shows.
 
 ## Updates
 

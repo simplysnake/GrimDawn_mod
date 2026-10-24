@@ -41,6 +41,14 @@ constexpr int kToggleKey = VK_F8;
 PresentFn g_origPresent = nullptr;
 ResizeBuffersFn g_origResizeBuffers = nullptr;
 
+// Capture tools (OBS game capture, Steam recording, overlays) hook Present's code too, and whichever hooked
+// last runs first: one that hooked after us copied the frame before the desktop mirror was drawn into it.
+// So the game's swap chain also gets its vtable entry pointed at us, which runs before any hook on the
+// function itself; the inline hook stays as the way in until then, and passes through while we're inside.
+void** g_vtable = nullptr;
+PresentFn g_vtableNext = nullptr;
+bool g_inFrontPresent = false;
+
 std::atomic<int> g_inFlight{0};
 std::atomic<bool> g_teardownRequested{false};
 std::atomic<bool> g_tornDown{false};
@@ -117,15 +125,46 @@ bool InitImGui(IDXGISwapChain* swapChain) {
   return true;
 }
 
-HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swapChain, UINT syncInterval, UINT flags) {
-  InFlightGuard guard;
-  if (g_tornDown) return g_origPresent(swapChain, syncInterval, flags);
+HRESULT STDMETHODCALLTYPE FrontPresent(IDXGISwapChain* swapChain, UINT syncInterval, UINT flags);
+
+void PatchVtable(IDXGISwapChain* swapChain) {
+  static bool tried = false;
+  if (tried) return;
+  tried = true;
+  void** vtable = *reinterpret_cast<void***>(swapChain);
+  DWORD old;
+  if (!VirtualProtect(&vtable[kPresentIndex], sizeof(void*), PAGE_READWRITE, &old)) {
+    Log("Present vtable entry not writable; capture tools may record the frame without the mirror");
+    return;
+  }
+  g_vtableNext = reinterpret_cast<PresentFn>(vtable[kPresentIndex]);
+  InterlockedExchangePointer(&vtable[kPresentIndex], reinterpret_cast<void*>(&FrontPresent));
+  VirtualProtect(&vtable[kPresentIndex], sizeof(void*), old, &old);
+  g_vtable = vtable;
+  Log("Present vtable entry hooked (ahead of capture tools)");
+}
+
+void UnpatchVtable() {
+  if (!g_vtable) return;
+  DWORD old;
+  if (g_vtable[kPresentIndex] == reinterpret_cast<void*>(&FrontPresent) &&
+      VirtualProtect(&g_vtable[kPresentIndex], sizeof(void*), PAGE_READWRITE, &old)) {
+    InterlockedExchangePointer(&g_vtable[kPresentIndex], reinterpret_cast<void*>(g_vtableNext));
+    VirtualProtect(&g_vtable[kPresentIndex], sizeof(void*), old, &old);
+  }
+  g_vtable = nullptr;
+}
+
+// One frame of the mod's work, then `next` presents it.
+HRESULT Frame(PresentFn next, IDXGISwapChain* swapChain, UINT syncInterval, UINT flags) {
+  if (g_tornDown) return next(swapChain, syncInterval, flags);
   if (g_teardownRequested) {
     Teardown();
     SetEvent(g_teardownDone);
-    return g_origPresent(swapChain, syncInterval, flags);
+    return next(swapChain, syncInterval, flags);
   }
 
+  PatchVtable(swapChain);
   g_swapChain = swapChain;
   if (!g_imguiReady) {
     g_imguiReady = InitImGui(swapChain);
@@ -167,7 +206,22 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swapChain, UINT syncInterv
   xr::OnPresent(swapChain);
   if (g_device) perf::OnPresent(g_device, g_context, xr::LastWaitMs());
   g_lastPresent = GetTickCount64();
-  return g_origPresent(swapChain, syncInterval, flags);
+  return next(swapChain, syncInterval, flags);
+}
+
+// Through the vtable: the frame's work, then on to Present's code (capture tools, then our inline hook).
+HRESULT STDMETHODCALLTYPE FrontPresent(IDXGISwapChain* swapChain, UINT syncInterval, UINT flags) {
+  InFlightGuard guard;
+  g_inFrontPresent = true;
+  const HRESULT hr = Frame(g_vtableNext, swapChain, syncInterval, flags);
+  g_inFrontPresent = false;
+  return hr;
+}
+
+HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swapChain, UINT syncInterval, UINT flags) {
+  InFlightGuard guard;
+  if (g_inFrontPresent) return g_origPresent(swapChain, syncInterval, flags);
+  return Frame(g_origPresent, swapChain, syncInterval, flags);
 }
 
 HRESULT STDMETHODCALLTYPE HookResizeBuffers(IDXGISwapChain* swapChain, UINT count, UINT width, UINT height,
@@ -297,6 +351,7 @@ bool Install() {
 // Releases everything that uses the D3D context or OpenXR, plus ImGui and the window hook.
 void Teardown() {
   if (g_tornDown.exchange(true)) return;
+  UnpatchVtable();
   xr::Shutdown();
   mask::Shutdown();
   sky::Shutdown();

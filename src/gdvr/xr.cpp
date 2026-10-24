@@ -626,7 +626,8 @@ void EndFrame() {
       layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&proj));
 
       // HUD: the game drew only its UI onto the cleared back buffer; show it on a floating panel.
-      bool hudShown = false;
+      mirror::Panel panels[2];
+      int panelCount = 0;
       if (g_settings.hud && g_hudPrepared) {
         sky::OnHudFrame(g_gameSwapChain);  // Devotion screen capture (UI layer, before the HUD pass)
         DrawCredit();
@@ -653,7 +654,7 @@ void EndFrame() {
           hudQuad.pose = ToXr({yaw * pitch, g_ref.position + Rotate(yaw, Vec3{0, -g_settings.hudDown, -g_settings.hudDistance} + shift)});
           hudQuad.size = {g_settings.hudWidth, fullH * crop};
           layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&hudQuad));
-          hudShown = true;
+          panels[panelCount++] = {ToPose(hudQuad.pose), hudQuad.size.width, hudQuad.size.height, {0, 0, 1, crop}};
           // The bottom bar on the off hand: the same HUD image, just its rectangle.
           if (HandHudActive()) {
             UpdateHandRect();
@@ -669,13 +670,15 @@ void EndFrame() {
             handQuad.pose = ToXr({g_ref.orientation * rel.orientation, g_ref.position + Rotate(g_ref.orientation, rel.position)});
             handQuad.size = {w, h};
             layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&handQuad));
+            panels[panelCount++] = {ToPose(handQuad.pose), w, h, {r[0], r[1], r[2], r[3]}};
           }
         }
       }
-      // Desktop mirror: the window shows the left eye with the HUD over it (the headset already has both).
+      // Desktop mirror: the window shows the left eye with the HUD panels where the headset shows them.
       ID3D11Texture2D* bb = nullptr;
       if (g_settings.mirror && SUCCEEDED(g_gameSwapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) {
-        mirror::Compose(g_device, g_context, bb, g_eyeTan[0][0], g_eyeTan[0][1], g_settings.mirrorFovDeg, hudShown);
+        mirror::Compose(g_device, g_context, bb, ToPose(pv[0].pose), g_eyeTan[0][0], g_eyeTan[0][1],
+                        g_settings.mirrorFovDeg, panels, panelCount);
         bb->Release();
       }
     } else if (!g_captureTimedOut && g_settings.mode != Mode::Off &&
