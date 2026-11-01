@@ -2,9 +2,13 @@
 // World-space fade-to-black around the player, drawn over each eye image.
 // Uses the scene's depth buffer (captured while the engine binds it) to rebuild world positions.
 
+#include <functional>
+
 #include "vr_math.h"
 
 struct ID3D11DeviceContext;
+struct ID3D11RenderTargetView;
+struct ID3D11DepthStencilView;
 struct IDXGISwapChain;
 
 namespace gdvr::mask {
@@ -59,6 +63,13 @@ float ProbedDepth();  // raw depth 0..1 (-1: none yet)
 void ClearSceneDepth(ID3D11DeviceContext* ctx);
 // Draws the picture (`rect` of the last menu layer) on the quad `corners` (BL BR TR TL, game space).
 void DrawCutout(IDXGISwapChain* swapChain, const EyeCam& cam, const Vec3 corners[4], const float rect[4]);
+
+// For other passes drawing into the eye image (controller models): runs `draw` with the back buffer's render
+// target view (not owned) and size, the engine's pipeline state saved before and restored after (vertex and
+// index buffers excepted). BindTargets binds targets without the depth-buffer watch.
+bool DrawOverBackBuffer(IDXGISwapChain* swapChain,
+                        const std::function<void(ID3D11DeviceContext*, ID3D11RenderTargetView*, unsigned, unsigned)>& draw);
+void BindTargets(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* dsv);
 
 // Draws the fade over the back buffer. Returns false if no usable depth buffer was found.
 bool Apply(IDXGISwapChain* swapChain, const Params& p);

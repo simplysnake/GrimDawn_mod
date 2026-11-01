@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(gdvr VERSION 0.3.3 LANGUAGES C CXX)
+project(gdvr VERSION 0.3.4 LANGUAGES C CXX)
 
 # Development builds (default) log into the repo and keep the diagnostics; release builds (package.ps1)
 # use only the install folder and %LOCALAPPDATA%\gdvr.
@@ -56,6 +56,7 @@ target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/
 
 # The mod itself, injected into Grim Dawn.exe
 add_library(gdvr SHARED
+  src/gdvr/controllers.cpp
   src/gdvr/d3dtrace.cpp
   src/gdvr/devotion.cpp
   src/gdvr/dllmain.cpp

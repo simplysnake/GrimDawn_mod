@@ -31,9 +31,10 @@ with the devotion constellations as the sky.
 - **Player menus on the hand** (done): inventory, skills, character and the other player windows open on the off
   hand like the skill bar (same HUD image, its own quad layer and rectangle; the laser clicks them there).
   The Devotion screen stays on the floating panel (much bigger).
-- **Controller models** in the headset (XR_MSFT_controller_model if SteamVR has it, else SteamVR's render
-  models).
-- **Controller warnings**: a log line and a short notice in the headset when a controller stops being
+- **Controller models** in the headset (done, tested on Index): SteamVR has no XR_MSFT_controller_model, so the
+  mod reads SteamVR's own render models (OBJ + texture, picked by interaction profile) and draws them into
+  each eye at the aim pose minus the model's "tip" offset. Static (buttons don't move yet).
+- **Controller warnings** (built, testing): a log line and a short notice in the headset when a controller stops being
   tracked or goes to standby.
 
 ### 1. Pointer in VR: world cursor + controller laser – medium (1–2 weeks)

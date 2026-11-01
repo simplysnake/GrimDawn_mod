@@ -1221,6 +1221,31 @@ bool TitleCharacterRect(float rect[4]) {
   return true;
 }
 
+bool DrawOverBackBuffer(IDXGISwapChain* swapChain,
+                        const std::function<void(ID3D11DeviceContext*, ID3D11RenderTargetView*, UINT, UINT)>& draw) {
+  if (!g_capturingAllowed || g_failed || !g_origOMSetRenderTargets || !swapChain) return false;
+  ID3D11Texture2D* bb = nullptr;
+  if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) return false;
+  const bool ok = EnsureDeviceAndRtv(bb);
+  if (ok) {
+    D3D11_TEXTURE2D_DESC bd;
+    bb->GetDesc(&bd);
+    ID3D11DeviceContext* ctx = nullptr;
+    g_device->GetImmediateContext(&ctx);
+    StateBackup backup;
+    backup.Save(ctx);
+    draw(ctx, g_rtv, bd.Width, bd.Height);
+    backup.Restore(ctx);
+    ctx->Release();
+  }
+  bb->Release();
+  return ok;
+}
+
+void BindTargets(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, ID3D11DepthStencilView* dsv) {
+  g_origOMSetRenderTargets(ctx, 1, &rtv, dsv);
+}
+
 void DrawCutout(IDXGISwapChain* swapChain, const EyeCam& cam, const Vec3 corners[4], const float rect[4]) {
   if (!g_capturingAllowed || g_failed || !g_hudCopySrv || !swapChain || !EnsureCutout()) return;
   float c[16];

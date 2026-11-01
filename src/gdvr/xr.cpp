@@ -29,6 +29,7 @@
 #include "mask.h"
 #include "mirror.h"
 #include "pointer.h"
+#include "controllers.h"
 
 namespace gdvr::xr {
 
@@ -526,6 +527,7 @@ bool SaveSettingsLocked() {
   put(L"hand_hud_right", s.handHudRect[2]);
   put(L"hand_hud_bottom", s.handHudRect[3]);
   put(L"hand_menus", s.handMenus);
+  put(L"controller_models", s.controllerModels);
   put(L"hand_menu_size", s.handMenuSize);
   put(L"hand_menu_max_width", s.handMenuMaxWidth);
   put(L"hand_menu_up", s.handMenuUp);
@@ -611,6 +613,73 @@ void DrawCredit() {
       {w * 0.5f, h * 0.37f, h * 0.035f, 0x00B0D8FFu | a, "created by artalva.com", false},
   };
   overlay::DrawWorldText(lines, 2);
+}
+
+// ---- Controller warnings -------------------------------------------------------------------------------
+// A controller that stops being tracked (switched off, standby, out of view) is logged and a notice shows on
+// the HUD panel for a few seconds, so a missing hand bar or dead buttons explain themselves. Only while the
+// headset is in use (session focused); the timers wait otherwise.
+struct HandWatch {
+  bool tracked = false, seen = false, warned = false;
+  double since = 0;     // tracking state last changed (or the wait started)
+  double noticeAt = 0;  // notice shown from here
+};
+HandWatch g_handWatch[2];
+constexpr double kLostMs = 1500, kNeverSeenMs = 8000, kNoticeMs = 8000;
+
+void WatchControllers() {
+  const double now = NowMs();
+  const bool focused = g_state == XR_SESSION_STATE_FOCUSED && g_haveRef;
+  for (int hand = 0; hand < 2; ++hand) {
+    HandWatch& w = g_handWatch[hand];
+    const char* name = hand ? "right" : "left";
+    if (!focused) {
+      w.since = now;
+      w.noticeAt = 0;
+      continue;
+    }
+    const bool tracked = g_handValid[hand] && input::AimTracked(hand);
+    if (tracked != w.tracked) {
+      w.tracked = tracked;
+      w.since = now;
+      if (w.tracked) {
+        if (w.warned) Log("input: %s controller tracked again", name);
+        w.seen = true;
+        w.warned = false;
+        w.noticeAt = 0;
+      }
+    }
+    if (!w.tracked && !w.warned && now - w.since > (w.seen ? kLostMs : kNeverSeenMs)) {
+      w.warned = true;
+      w.noticeAt = now;
+      Log("input: %s controller %s (%s)", name, w.seen ? "stopped being tracked" : "not found",
+          input::HandConnected(hand) ? "still connected: out of view of the tracking?" : "off or in standby");
+    }
+  }
+}
+
+// The notice on the HUD panel, under the credit's place.
+void DrawControllerNotice() {
+  const double now = NowMs();
+  overlay::WorldText lines[2];
+  char text[2][96];
+  int n = 0;
+  const float w = float(g_hudChain.width), h = float(g_hudChain.height);
+  for (int hand = 0; hand < 2; ++hand) {
+    const HandWatch& hw = g_handWatch[hand];
+    if (!hw.noticeAt || now - hw.noticeAt > kNoticeMs) continue;
+    const double t = (now - hw.noticeAt) / 1000.0, fade = 1.5;
+    const float alpha = float(std::min(1.0, (kNoticeMs / 1000.0 - t) / fade));
+    const char* name = hand ? "Right" : "Left";
+    if (input::HandConnected(hand))
+      sprintf_s(text[n], "%s controller lost tracking - bring it into view", name);
+    else
+      sprintf_s(text[n], "%s controller is off or asleep - press its system button", name);
+    lines[n] = {w * 0.5f, h * (0.20f + 0.05f * n), h * 0.035f, 0x0040C0FFu | (unsigned(alpha * 255.0f) << 24),
+                text[n], true};
+    ++n;
+  }
+  if (n) overlay::DrawWorldText(lines, n);
 }
 
 // Ends the frame begun by the previous OnPresent, submitting whatever was captured for it.
@@ -760,6 +829,7 @@ void EndFrame() {
       if (g_settings.hud && g_hudPrepared) {
         sky::OnHudFrame(g_gameSwapChain);  // Devotion screen capture (UI layer, before the HUD pass)
         DrawCredit();
+        DrawControllerNotice();
         if (g_dumpEyes & 4) DumpBackBuffer(L"hud_raw", false);  // the UI as the game drew it
         mask::FixHudAlpha(g_gameSwapChain, CurrentHudLook());
         if (g_dumpEyes & 4) {  // ...and as shown on the panel
@@ -890,6 +960,7 @@ void BeginFrame() {
     g_handValid[hand] = g_haveRef && input::LocateAim(hand, g_localSpace, g_frameState.predictedDisplayTime, aim);
     if (g_handValid[hand]) g_handRel[hand] = Relative(g_ref, ToPose(aim));
   }
+  WatchControllers();
 
   // Controllers -> virtual gamepad (read by the game through XInputGetState).
   if (input::Sync(g_session, g_state == XR_SESSION_STATE_FOCUSED)) g_recenterRequested = true;
@@ -1264,6 +1335,7 @@ void Shutdown() {
   }
   DestroyAll();
   mirror::Shutdown();
+  controllers::Shutdown();
   if (g_bbRtv) g_bbRtv->Release();
   g_bbRtv = nullptr;
   g_bbRtvTex = nullptr;
@@ -1395,6 +1467,8 @@ void DrawDebugUI() {
     ImGui::SliderFloat("Window tilt up (deg)", &g_settings.handMenuTiltDeg, -30.0f, 90.0f, "%.0f");
     ImGui::SliderFloat("Widest window on the hand (share of the HUD)", &g_settings.handMenuMaxWidth, 0.2f, 1.0f, "%.2f");
   }
+
+  if (ImGui::CollapsingHeader("Controllers")) controllers::DrawDebugUI();
 
   if (ImGui::CollapsingHeader("Desktop mirror (recording)")) {
     ImGui::Checkbox("Show the headset view in the game window (left eye + HUD)", &g_settings.mirror);

@@ -24,6 +24,7 @@
 #include "numbers.h"
 #include "perf.h"
 #include "pointer.h"
+#include "controllers.h"
 #include "sky.h"
 #include "vr_math.h"
 #include "xr.h"
@@ -583,6 +584,7 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
       labels::DrawEye(ev);
       numbers::DrawEye(ev);
       pointer::DrawEye(ev);
+      controllers::DrawEye(eye, tanX, tanY);
 
       if (title) {
         const Vec3 ray = Normalize(feetDir);
@@ -823,6 +825,7 @@ void PollControlFile() {
   vr.handHudRect[2] = getFloat(L"hand_hud_right", vr.handHudRect[2]);
   vr.handHudRect[3] = getFloat(L"hand_hud_bottom", vr.handHudRect[3]);
   vr.handMenus = getInt(L"hand_menus", vr.handMenus) != 0;
+  vr.controllerModels = getInt(L"controller_models", vr.controllerModels) != 0;
   vr.handMenuSize = getFloat(L"hand_menu_size", vr.handMenuSize);
   vr.handMenuMaxWidth = getFloat(L"hand_menu_max_width", vr.handMenuMaxWidth);
   vr.handMenuUp = getFloat(L"hand_menu_up", vr.handMenuUp);

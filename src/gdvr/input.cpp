@@ -183,6 +183,10 @@ bool g_pointerMode = false;
 XrPath g_handPaths[2] = {};
 XrSpace g_aimSpaces[2] = {};  // controller aim pose (pointer ray) per hand
 std::string g_profiles = "none";
+std::atomic<bool> g_handConnected[2] = {};  // a controller is reported for each hand
+bool g_aimTracked[2] = {};                   // ...and its position is tracked (last LocateAim)
+std::mutex g_profileMutex;
+std::string g_handProfile[2];                // interaction profile path per hand ("" = none)
 
 // ---- Virtual gamepad ---------------------------------------------------------------------
 std::mutex g_padMutex;
@@ -579,7 +583,12 @@ bool PointerControls(XINPUT_GAMEPAD& controls) {
 bool LocateAim(int hand, XrSpace base, XrTime time, XrPosef& pose) {
   if (!g_aimSpaces[hand & 1] || !base) return false;
   XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
-  if (XR_FAILED(xrLocateSpace(g_aimSpaces[hand & 1], base, time, &loc))) return false;
+  if (XR_FAILED(xrLocateSpace(g_aimSpaces[hand & 1], base, time, &loc))) {
+    g_aimTracked[hand & 1] = false;
+    return false;
+  }
+  // Out of view the runtime keeps guessing the pose (still "valid"), but it is no longer "tracked".
+  g_aimTracked[hand & 1] = (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
   const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
   if ((loc.locationFlags & need) != need) return false;
   pose = loc.pose;
@@ -598,17 +607,32 @@ void DestroyActions() {
   g_pad = {};
   g_padActive = false;
   g_profiles = "none";
+  g_handConnected[0] = g_handConnected[1] = false;
+}
+
+bool HandConnected(int hand) { return g_handConnected[hand & 1].load(); }
+bool AimTracked(int hand) { return g_aimTracked[hand & 1]; }
+
+std::string HandProfile(int hand) {
+  std::lock_guard lock(g_profileMutex);
+  return g_handProfile[hand & 1];
 }
 
 void OnInteractionProfileChanged(XrInstance instance, XrSession session) {
   std::string text;
+  int index = 0;
   for (const char* hand : {"/user/hand/left", "/user/hand/right"}) {
     XrInteractionProfileState st{XR_TYPE_INTERACTION_PROFILE_STATE};
     char buf[XR_MAX_PATH_LENGTH] = "none";
     uint32_t len = 0;
-    if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(session, ToPath(instance, hand), &st)) &&
-        st.interactionProfile != XR_NULL_PATH)
-      xrPathToString(instance, st.interactionProfile, sizeof(buf), &len, buf);
+    const bool connected = XR_SUCCEEDED(xrGetCurrentInteractionProfile(session, ToPath(instance, hand), &st)) &&
+                           st.interactionProfile != XR_NULL_PATH;
+    if (connected) xrPathToString(instance, st.interactionProfile, sizeof(buf), &len, buf);
+    {
+      std::lock_guard lock(g_profileMutex);
+      g_handProfile[index] = connected ? buf : "";
+    }
+    g_handConnected[index++] = connected;
     text += std::string(hand + 11) + "=" + buf + " ";
   }
   g_profiles = text;
@@ -626,6 +650,7 @@ void DrawDebugUI() {
     active = g_padActive;
   }
   ImGui::Text("Controllers: %s", g_profiles.c_str());
+  ImGui::Text("Tracked: left %d  right %d", int(g_aimTracked[0]), int(g_aimTracked[1]));
   ImGui::Text("VR pad active=%d  real gamepad seen=%d  buttons=0x%04X", int(active), g_realPadSeen.load(), p.wButtons);
   ImGui::Text("L %6d %6d  R %6d %6d  LT %3d RT %3d", p.sThumbLX, p.sThumbLY, p.sThumbRX, p.sThumbRY, p.bLeftTrigger,
               p.bRightTrigger);

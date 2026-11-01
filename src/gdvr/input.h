@@ -9,6 +9,8 @@
 #include <Xinput.h>
 #include <openxr/openxr.h>
 
+#include <string>
+
 namespace gdvr::input {
 
 // Hooks XInputGetState in the game's XInput DLL (hook created, not enabled).
@@ -46,6 +48,12 @@ void DestroyActions();
 
 // Logs the interaction profile now in use for each hand.
 void OnInteractionProfileChanged(XrInstance instance, XrSession session);
+// The runtime reports a controller for this hand (0 left, 1 right): false when it is off or in standby.
+bool HandConnected(int hand);
+// The last LocateAim for this hand had a tracked position (not just the runtime's guess while out of view).
+bool AimTracked(int hand);
+// The interaction profile in use for this hand ("/interaction_profiles/valve/index_controller"; "" = none).
+std::string HandProfile(int hand);
 
 int InFlight();
 void DrawDebugUI();

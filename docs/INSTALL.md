@@ -69,6 +69,9 @@ The bottom bar (health, energy, skills) sits on your left hand. Player windows (
 skills...) open there too and are clicked with the laser; wide ones (Devotion, the map) and the game menu
 stay on the floating panel. Size, height and tilt are in the F8 window under **Hand HUD**.
 
+Your controllers are shown in the headset (SteamVR's own models; F8 > **Controllers** turns them off). If one
+stops being tracked or goes to standby, a short notice says so on the floating panel.
+
 Keyboard: **F8** settings window, **F9** VR mode (off, flat screen, stereo), **F10** recentre,
 **F7** fade at the edge of the play area, **F11** save screenshots of both eyes.
 

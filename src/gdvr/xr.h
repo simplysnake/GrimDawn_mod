@@ -39,6 +39,7 @@ struct Settings {
   float handMenuMaxWidth = 0.55f; // windows up to this share of the HUD image's width go on the hand
   float handMenuUp = 0.04f;       // metres from the controller to the window's bottom edge
   float handMenuTiltDeg = 30.0f;  // 0 = facing you, 90 = facing up
+  bool controllerModels = true;   // SteamVR's controller models drawn at the controllers
   bool titleCutout = true;       // title screen: the character picture stands in the 3D scene
   bool mirror = true;            // the game window shows the left eye with the HUD (for recording/streaming)
   float mirrorFovDeg = 90.0f;    // ...cropped to this horizontal field of view
