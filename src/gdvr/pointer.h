@@ -35,6 +35,9 @@ void ParkCursor(double ms);
 // Presses and releases a key in the game (DirectInput code, e.g. DIK_D), render thread.
 void TapKey(int dik);
 
+// Seconds since the camera was last turned by the sticks or touch pads (freeze diagnostics).
+double SecondsSinceTurn();
+
 // True while stereo frames keep updating the pointer.
 bool Live();
 

@@ -432,20 +432,28 @@ bool DeviceFunctions(REFIID iid, void*& state, void*& dataFn) {
 }
 
 // ---- Controller layout (pointer mode) ----------------------------------------------------------
-// Right trigger = left click at the laser, left trigger = right click; left stick walks; face
-// buttons hotbar 1-4; right-stick flicks hotbar 5-8; grips potions; stick clicks W / Y (both =
-// recentre); left trackpad/view: inventory (hold: map); right trackpad/menu: game menu (hold: character).
-// Sliding a thumb on the touch pads (no press) zooms (right) and turns the camera (left): PadCamera.
+// In the virtual pad's terms the right side is the pointer hand and the left side the off hand (a
+// left-handed player's controls are mirrored first: Mirrored).
+// Pointer trigger = left click at the laser, off-hand trigger = right click; off-hand stick walks, the
+// pointer stick turns (x) and zooms (y) the camera (StickCamera); face buttons hotbar 1-4 (pointer A/B
+// = 1/2, off hand = 3/4), with a grip held hotbar 5-8; a quick grip squeeze = potion (off hand health,
+// pointer hand energy); stick clicks W / Y (both = recentre), with a grip held inventory (off hand) / map
+// (pointer hand); left trackpad/view: inventory (hold: map); right trackpad/menu: game menu (hold:
+// character). Sliding a thumb on the touch pads (no press) zooms (right) and turns the camera (left).
 constexpr double kTapMs = 90;
 constexpr double kHoldMs = 500;
+constexpr double kGripTapMs = 400;  // a grip squeezed and let go within this, nothing else pressed: potion
 
 struct Layout {
   double tapUntil[256] = {};
   // stick clicks (W / Y, both together = recentre)
-  bool lThumb = false, rThumb = false, chord = false;
+  bool lThumb = false, rThumb = false, chord = false, lThumbGrip = false, rThumbGrip = false;
   double lThumbAt = 0, rThumbAt = 0;
-  // right stick flicks
-  bool flickArmed = true;
+  // face buttons: the hotbar key each one pressed (chosen when it went down, grip or not), 0 = up
+  int faceKey[4] = {};
+  // grips: potion on a quick squeeze, unless used as the shift for other buttons meanwhile
+  bool gripDown[2] = {}, gripUsed[2] = {};
+  double gripAt[2] = {};
   // trackpads / menu buttons: tap or hold
   bool backDown = false, startDown = false, backLong = false, startLong = false;
   double backAt = 0, startAt = 0;
@@ -454,40 +462,80 @@ Layout g_layout;  // render thread only
 
 void Tap(Layout& l, int dik, double now) { l.tapUntil[dik] = now + kTapMs; }
 
+// Left-handed: the pointer hand's controls (left controller) take the pad's right side and the other way
+// round. The menu buttons and touch pads stay as they are (Quest has a menu button on the left only).
+XINPUT_GAMEPAD Mirrored(const XINPUT_GAMEPAD& c) {
+  XINPUT_GAMEPAD m = c;
+  std::swap(m.sThumbLX, m.sThumbRX);
+  std::swap(m.sThumbLY, m.sThumbRY);
+  std::swap(m.bLeftTrigger, m.bRightTrigger);
+  const WORD pairs[][2] = {{XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_X}, {XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_Y},
+                           {XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER},
+                           {XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_THUMB}};
+  for (const auto& p : pairs) {
+    m.wButtons &= ~(p[0] | p[1]);
+    if (c.wButtons & p[0]) m.wButtons |= p[1];
+    if (c.wButtons & p[1]) m.wButtons |= p[0];
+  }
+  return m;
+}
+
 void MapControls(const XINPUT_GAMEPAD& c, double now, Output& out) {
   Layout& l = g_layout;
   auto held = [&](WORD bit) { return (c.wButtons & bit) != 0; };
-  out.keys[DIK_1] = held(XINPUT_GAMEPAD_A);
-  out.keys[DIK_2] = held(XINPUT_GAMEPAD_B);
-  out.keys[DIK_3] = held(XINPUT_GAMEPAD_X);
-  out.keys[DIK_4] = held(XINPUT_GAMEPAD_Y);
-  out.keys[DIK_R] = held(XINPUT_GAMEPAD_LEFT_SHOULDER);   // health potion
-  out.keys[DIK_E] = held(XINPUT_GAMEPAD_RIGHT_SHOULDER);  // energy potion
+  const bool grip[2] = {held(XINPUT_GAMEPAD_LEFT_SHOULDER), held(XINPUT_GAMEPAD_RIGHT_SHOULDER)};
+  const bool shift = grip[0] || grip[1];
+  auto useGrips = [&] {
+    for (int g = 0; g < 2; ++g)
+      if (grip[g]) l.gripUsed[g] = true;
+  };
 
-  // Stick clicks: a quick click = W (left: swap weapons) / Y (right: swap skill bar); both = recentre.
+  // Face buttons: hotbar 1-4, or 5-8 while a grip is held (kept for as long as the button is held).
+  const struct { WORD bit; int key, shifted; } face[4] = {{XINPUT_GAMEPAD_A, DIK_1, DIK_5}, {XINPUT_GAMEPAD_B, DIK_2, DIK_6},
+                                                          {XINPUT_GAMEPAD_X, DIK_3, DIK_7}, {XINPUT_GAMEPAD_Y, DIK_4, DIK_8}};
+  for (int i = 0; i < 4; ++i) {
+    if (!held(face[i].bit)) {
+      l.faceKey[i] = 0;
+      continue;
+    }
+    if (!l.faceKey[i]) l.faceKey[i] = shift ? face[i].shifted : face[i].key;
+    if (shift) useGrips();
+    out.keys[l.faceKey[i]] = true;
+  }
+
+  // Grips: a quick squeeze and release drinks a potion (off hand: health, pointer hand: energy).
+  const int potion[2] = {DIK_R, DIK_E};
+  for (int g = 0; g < 2; ++g) {
+    if (grip[g] && !l.gripDown[g]) {
+      l.gripAt[g] = now;
+      l.gripUsed[g] = false;
+    }
+    if (!grip[g] && l.gripDown[g] && !l.gripUsed[g] && now - l.gripAt[g] < kGripTapMs) Tap(l, potion[g], now);
+    l.gripDown[g] = grip[g];
+  }
+
+  // Stick clicks: a quick click = W (off hand: swap weapons) / Y (pointer hand: swap skill bar), with a
+  // grip held I (inventory) / M (map); both sticks = recentre.
   const bool lt = held(XINPUT_GAMEPAD_LEFT_THUMB), rt = held(XINPUT_GAMEPAD_RIGHT_THUMB);
   if (lt && rt && !l.chord) {
     l.chord = true;
     xr::RequestRecenter();
     Log("pointer: recentre (both sticks)");
   }
-  if (lt && !l.lThumb) l.lThumbAt = now;
-  if (rt && !l.rThumb) l.rThumbAt = now;
-  if (!lt && l.lThumb && !l.chord && now - l.lThumbAt < 400) Tap(l, DIK_W, now);
-  if (!rt && l.rThumb && !l.chord && now - l.rThumbAt < 400) Tap(l, DIK_Y, now);
+  if (lt && !l.lThumb) {
+    l.lThumbAt = now;
+    l.lThumbGrip = shift;
+  }
+  if (rt && !l.rThumb) {
+    l.rThumbAt = now;
+    l.rThumbGrip = shift;
+  }
+  if ((lt || rt) && shift) useGrips();
+  if (!lt && l.lThumb && !l.chord && now - l.lThumbAt < 400) Tap(l, l.lThumbGrip ? DIK_I : DIK_W, now);
+  if (!rt && l.rThumb && !l.chord && now - l.rThumbAt < 400) Tap(l, l.rThumbGrip ? DIK_M : DIK_Y, now);
   l.lThumb = lt;
   l.rThumb = rt;
   if (!lt && !rt) l.chord = false;
-
-  // Right stick flicks: hotbar 5 (up), 6 (right), 7 (down), 8 (left).
-  const float rx = c.sThumbRX / 32767.0f, ry = c.sThumbRY / 32767.0f;
-  const float rmag = std::sqrt(rx * rx + ry * ry);
-  if (rmag < 0.35f) l.flickArmed = true;
-  if (rmag > 0.75f && l.flickArmed) {
-    l.flickArmed = false;
-    const int dik = std::fabs(ry) >= std::fabs(rx) ? (ry > 0 ? DIK_5 : DIK_7) : (rx > 0 ? DIK_6 : DIK_8);
-    Tap(l, dik, now);
-  }
 
   // Trackpads / menu buttons: tap or hold.
   auto tapOrHold = [&](bool down, bool& wasDown, bool& longFired, double& at, int tapKey, int holdKey) {
@@ -573,25 +621,50 @@ PadSlide g_zoomPad, g_turnPad;
 float g_yawPending = 0;  // turn still to apply (radians), spread over frames
 float g_yawLogged = 0;   // turned since the last log line
 ULONGLONG g_yawLogAt = 0;
+double g_cameraAt = 0;   // NowMs() of the last camera update (stick rates)
 
-void PadCamera(bool inWorld) {
+// The pointer hand's stick: x turns, y zooms (up = closer), at a rate that grows with the push. The
+// stick turns at its own speed (F8 > Pointer), not held to the pads' per-frame cap.
+constexpr float kStickDeadzone = 0.3f;
+constexpr float kStickZoomPerSec = 8.0f;  // GameCamera::Zoom units per second at full push
+ULONGLONG g_turnedAt = 0;  // GetTickCount64() of the last camera turn
+
+float StickAxis(SHORT v) {
+  const float a = v / 32767.0f;
+  const float m = std::fabs(a);
+  return m < kStickDeadzone ? 0.0f : std::copysign(std::min(1.0f, (m - kStickDeadzone) / (1 - kStickDeadzone)), a);
+}
+
+// controls: the pointer-mode pad (pointer hand on the right side), or null without pointer controls.
+void PadCamera(bool inWorld, const XINPUT_GAMEPAD* controls, double now) {
+  const float dt = float(std::clamp((now - g_cameraAt) / 1000.0, 0.0, 0.1));
+  g_cameraAt = now;
   const input::TouchPads p = input::Pads();
-  const float zoom = g_zoomPad.Step(p.rightTouch, p.rightPress, p.right.y);
+  float zoom = -g_zoomPad.Step(p.rightTouch, p.rightPress, p.right.y) * kZoomPerPad;  // slide up = closer
   const float turn = g_turnPad.Step(p.leftTouch, p.leftPress, p.left.y);
   if (!inWorld || xr::HudMenuOpen()) {
     g_yawPending = 0;
     return;
   }
   g_yawPending += turn * kYawPerPad;
-  const float yaw = std::clamp(g_yawPending, -kMaxYawPerFrame, kMaxYawPerFrame);
+  float yaw = std::clamp(g_yawPending, -kMaxYawPerFrame, kMaxYawPerFrame);
   g_yawPending -= yaw;
+  float stickTurn = 0;
+  if (controls) {
+    zoom -= StickAxis(controls->sThumbRY) * kStickZoomPerSec * dt;  // push up = closer
+    // Squared, so a light push turns slowly and a full push at the set speed.
+    const float x = StickAxis(controls->sThumbRX);
+    stickTurn = x * std::fabs(x) * xr::GetSettings().stickTurnDegPerSec / 57.2958f * dt;
+    yaw += stickTurn;
+  }
   if (zoom == 0 && yaw == 0) return;
   ResolveCamera();
-  if (!g_cam.ok || !CameraStep(-zoom * kZoomPerPad, yaw)) return;  // slide up = closer
+  if (!g_cam.ok || !CameraStep(zoom, yaw)) return;
+  if (yaw != 0) g_turnedAt = GetTickCount64();
   g_yawLogged += yaw;
   if (GetTickCount64() - g_yawLogAt > 2000 && g_yawLogged != 0) {
     g_yawLogAt = GetTickCount64();
-    Log("pointer: camera turned %.0f deg (touch pad)", g_yawLogged * 57.2958f);
+    Log("pointer: camera turned %.0f deg (%s)", g_yawLogged * 57.2958f, stickTurn != 0 ? "stick" : "touch pad");
     g_yawLogged = 0;
   }
 }
@@ -716,6 +789,8 @@ bool Install() {
   return cursorOk && devicesOk;
 }
 
+double SecondsSinceTurn() { return g_turnedAt ? (GetTickCount64() - g_turnedAt) / 1000.0 : -1.0; }
+
 bool Live() { return LiveNow(); }
 
 bool CursorFeed(float& x, float& y) {
@@ -768,8 +843,8 @@ void Update(Vec3 origin, Vec3 right, Vec3 up, Vec3 fwd, float scale, Vec3 target
     // HUD panel: only where it shows something (and never the minimap), in front of the ground hit
     // (both measured along the ray; the panel in metres).
     float u, v, panelDist;
-    const bool menu = xr::HudMenuOpen();
-    if (xr::HandHudRay(aim.position, dirRel, u, v, panelDist) ||  // the bar on the off hand: always in front
+    const bool menu = xr::HudMenuOpen() && !xr::HandMenuOpen();  // a menu on the floating panel
+    if (xr::HandHudRay(aim.position, dirRel, u, v, panelDist) ||  // the bar or window on the off hand: in front
         (xr::HudPanelRay(aim.position, dirRel, u, v, panelDist) && xr::HudSolidAt(u, v, g_onPanelLast) &&
          (menu || groundT <= 0 || panelDist * scale < groundT))) {
       st.onPanel = true;
@@ -803,11 +878,13 @@ void Update(Vec3 origin, Vec3 right, Vec3 up, Vec3 fwd, float scale, Vec3 target
 
   g_onPanelLast = st.onPanel;
 
-  PadCamera(haveTarget);
-
   // Pointer mode: the controls become mouse and keyboard.
   XINPUT_GAMEPAD c{};
   const bool active = input::PointerControls(c);
+  if (active && s.pointerHand == 0) c = Mirrored(c);
+
+  PadCamera(haveTarget, active ? &c : nullptr, now);
+
   Output out;
   float feedX = st.clientX, feedY = st.clientY;
   bool feed = st.haveClient;

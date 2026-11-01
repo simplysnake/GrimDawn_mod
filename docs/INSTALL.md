@@ -41,7 +41,10 @@ Library > Browse**, pick `gdvr_launch.exe`, and do step 4 above.
 
 Normal Grim Dawn from Steam keeps working as before, with your own settings.
 
-## Controls (Valve Index)
+## Controls
+
+The laser is on your right hand. Left-handed: in the F8 window under **Pointer**, pick **Left hand**, and
+every control below swaps hands (the menu buttons and touch pads stay where they are).
 
 | Control | Does |
 |---|---|
@@ -49,16 +52,22 @@ Normal Grim Dawn from Steam keeps working as before, with your own settings.
 | Right trigger | Left click (walk, attack, pick up, press buttons) |
 | Left trigger | Right click (skill) |
 | Left stick | Walk |
-| A / B (right), A / B (left) | Hotbar 1-4 |
-| Right stick flick up / right / down / left | Hotbar 5-8 |
-| Grips | Health potion (left), energy potion (right) |
-| Left stick click / right stick click | Swap weapons / Y; both together: recentre the view |
-| Left touch pad press | Inventory (hold: map) |
-| Right touch pad press | Game menu (hold: character) |
-| Right touch pad slide up / down | Zoom in / out |
-| Left touch pad slide | Turn the camera |
+| Right stick | Turn the camera (left / right; speed in F8 > Pointer), zoom (up: closer, down: further) |
+| A / B (right), A / B or X / Y (left) | Hotbar 1-2, 3-4 |
+| Hold either grip + those buttons | Hotbar 5-6, 7-8 |
+| Quick squeeze of a grip | Health potion (left), energy potion (right) |
+| Left stick click / right stick click | Swap weapons / swap skill bar; both together: recentre the view |
+| Hold a grip + left / right stick click | Inventory / map |
+| Left menu button (Quest) | Game menu (hold: character) |
+| Index: left touch pad press | Inventory (hold: map) |
+| Index: right touch pad press | Game menu (hold: character) |
+| Index: touch pads slide | Zoom (right pad), turn the camera (left pad) |
 
 Assign skills to the hotbar the usual way: point at a hotbar slot and pull the right trigger.
+
+The bottom bar (health, energy, skills) sits on your left hand. Player windows (inventory, character,
+skills...) open there too and are clicked with the laser; wide ones (Devotion, the map) and the game menu
+stay on the floating panel. Size, height and tilt are in the F8 window under **Hand HUD**.
 
 Keyboard: **F8** settings window, **F9** VR mode (off, flat screen, stereo), **F10** recentre,
 **F7** fade at the edge of the play area, **F11** save screenshots of both eyes.

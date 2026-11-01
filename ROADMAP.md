@@ -24,6 +24,18 @@ with the devotion constellations as the sky.
 
 ## Next (suggested order)
 
+### 0. Controllers – next up
+- **Standard layout** (done, tested on Index): grip held + face buttons = hotbar 5-8; the pointer hand's stick
+  zooms (y) and turns (x); a quick grip squeeze-and-release = potion; grip + stick click = inventory / map;
+  left-handed mirrors everything. Makes Quest Touch fully playable.
+- **Player menus on the hand** (done): inventory, skills, character and the other player windows open on the off
+  hand like the skill bar (same HUD image, its own quad layer and rectangle; the laser clicks them there).
+  The Devotion screen stays on the floating panel (much bigger).
+- **Controller models** in the headset (XR_MSFT_controller_model if SteamVR has it, else SteamVR's render
+  models).
+- **Controller warnings**: a log line and a short notice in the headset when a controller stops being
+  tracked or goes to standby.
+
 ### 1. Pointer in VR: world cursor + controller laser – medium (1–2 weeks)
 One pipeline: a point in the 3D world becomes the game's mouse position. Sources feed it the point:
 - **Controller laser** (primary): a ray from the VR controller; trigger = click (move / attack / pick up),

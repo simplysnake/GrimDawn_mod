@@ -336,6 +336,86 @@ float g_hudLum = -1.0f;    // smoothed scene brightness
 float g_hudDayAmount = 0;  // 0 = night look, 1 = daylight look
 std::atomic<bool> g_hudMenuOpen{false};  // a game menu is open (from HUD coverage); read without g_mutex
 
+// ---- Player windows on the off hand -------------------------------------------------------------------
+// The open window is what the HUD shows that it didn't before the menu opened (mask::HudNewContentBounds).
+// Narrow enough (one window) and the game isn't paused (the Esc menu): it goes on the off hand, and the
+// floating panel shows the rest of the HUD around it.
+std::atomic<bool> g_handMenu{false};  // a window is on the hand
+float g_menuBase[4] = {};   // the window in the HUD image: its place and size on the hand
+float g_menuRect[4] = {};   // what the hand shows: the window and what grows out of it (item tooltips)
+float g_menuCand[4] = {};   // a new window settling (opening animation)
+double g_menuCandAt = 0, g_menuGrownUntil = 0, g_menuSeenAt = 0;
+
+void UpdateHandMenu(bool covered, bool paused, const float (*skipRects)[4], int rectCount) {
+  static bool loggedWide = false;
+  float found[4];
+  const bool locked = g_handMenu;
+  const bool have = mask::HudNewContentBounds(!covered && !paused, skipRects, rectCount, 0.12f,
+                                              locked ? g_menuBase : nullptr, found);
+  if (!g_settings.handMenus || !covered || paused) {
+    g_handMenu = false;
+    g_menuCandAt = 0;
+    loggedWide = false;
+    return;
+  }
+  const double now = NowMs();
+  if (locked) {
+    // The window stays on the hand until the menu closes or it is gone; what appears elsewhere (another
+    // window, HUD parts changing) stays on the floating panel.
+    if (!have) {
+      if (now - g_menuSeenAt > 400) {
+        Log("hud: window on the hand closed");
+        g_handMenu = false;
+        g_menuCandAt = 0;
+      }
+      return;
+    }
+    // A much wider menu took its place (the map opened over it): decide again.
+    if (found[2] - found[0] > std::max(0.8f, g_settings.handMenuMaxWidth + 0.2f)) {
+      Log("hud: window on the hand replaced by a wide menu");
+      g_handMenu = false;
+      g_menuCandAt = 0;
+      return;
+    }
+    g_menuSeenAt = now;
+    // Something growing out of the window (a tooltip): show both, the window keeps its place.
+    const float* b = g_menuBase;
+    float grownRect[4];
+    for (int k = 0; k < 2; ++k) grownRect[k] = std::min(b[k], found[k]);
+    for (int k = 2; k < 4; ++k) grownRect[k] = std::max(b[k], found[k]);
+    const bool grown = found[0] < b[0] - 0.01f || found[1] < b[1] - 0.01f || found[2] > b[2] + 0.01f || found[3] > b[3] + 0.01f;
+    if (grown && grownRect[2] - grownRect[0] <= g_settings.handMenuMaxWidth) {
+      std::copy(grownRect, grownRect + 4, g_menuRect);
+      g_menuGrownUntil = now + 300;  // stays grown a moment (no flicker)
+    } else if (now >= g_menuGrownUntil) {
+      std::copy(b, b + 4, g_menuRect);
+    }
+    return;
+  }
+  if (!have) return;
+  // Something else: wait until it stops changing, then decide where it goes.
+  bool same = g_menuCandAt > 0;
+  for (int k = 0; k < 4 && same; ++k) same = std::fabs(found[k] - g_menuCand[k]) < 0.015f;
+  if (!same) {
+    std::copy(found, found + 4, g_menuCand);
+    g_menuCandAt = now;
+    return;
+  }
+  if (now - g_menuCandAt < 150) return;
+  const bool fits = found[2] - found[0] <= g_settings.handMenuMaxWidth && found[3] - found[1] > 0.05f;
+  if (fits) {
+    std::copy(found, found + 4, g_menuBase);
+    std::copy(found, found + 4, g_menuRect);
+    g_menuSeenAt = now;
+    g_handMenu = true;
+    loggedWide = false;
+    Log("hud: window %.2f %.2f %.2f %.2f on the hand", found[0], found[1], found[2], found[3]);
+  } else if (!loggedWide) {
+    loggedWide = true;
+    Log("hud: window %.2f %.2f %.2f %.2f too wide: floating panel", found[0], found[1], found[2], found[3]);
+  }
+}
+
 mask::HudLook CurrentHudLook() {
   const float lum = mask::SceneBrightness();
   if (lum >= 0) g_hudLum = g_hudLum < 0 ? lum : g_hudLum + (lum - g_hudLum) * 0.04f;  // ~0.5 s at 50 fps
@@ -401,6 +481,9 @@ mask::HudLook CurrentHudLook() {
     if (covered && g_menuContent < g_settings.hudMenuCoverage * 0.6f) covered = false;  // hysteresis
   }
   g_hudMenuOpen = covered || paused;
+  // The window itself: leave out the bottom bar, the minimap block (the minimap scrolls as you walk, which
+  // looks like new content) and the F8 window. The player windows don't reach the block.
+  UpdateHandMenu(covered, paused, skipRects, 3);
   look.sideShift = g_hudMenuOpen ? 0.0f : g_settings.hudSideShift;
   look.sideWidth = g_settings.hudSideWidth;
   look.sideHeight = g_settings.hudSideHeight;
@@ -442,6 +525,11 @@ bool SaveSettingsLocked() {
   put(L"hand_hud_top", s.handHudRect[1]);
   put(L"hand_hud_right", s.handHudRect[2]);
   put(L"hand_hud_bottom", s.handHudRect[3]);
+  put(L"hand_menus", s.handMenus);
+  put(L"hand_menu_size", s.handMenuSize);
+  put(L"hand_menu_max_width", s.handMenuMaxWidth);
+  put(L"hand_menu_up", s.handMenuUp);
+  put(L"hand_menu_tilt", s.handMenuTiltDeg);
   put(L"mirror", s.mirror);
   put(L"mirror_fov", s.mirrorFovDeg);
   put(L"sky", s.sky);
@@ -490,6 +578,7 @@ bool SaveSettingsLocked() {
   put(L"item_labels_3d", s.itemLabels3d);
   put(L"pointer", s.pointer);
   put(L"pointer_hand", s.pointerHand);
+  put(L"stick_turn_speed", s.stickTurnDegPerSec);
   put(L"pure_controller", s.pureController);
   put(L"hud_brightness", s.hudBrightness);
   put(L"hud_opacity", s.hudOpacity);
@@ -570,27 +659,67 @@ void UpdateHandRect() {
 
 // The hand panel, relative to g_ref: above the off-hand controller, tilted towards the face. The bar keeps its
 // place and size on the hand; when the panel grows (a flyout), it grows around it.
+// A player window is on the hand (instead of the bar, which is on the floating panel while a menu is open).
+bool HandMenuActive() {
+  return g_settings.hud && g_settings.handMenus && g_handMenu && g_inWorld && g_handValid[OffHand()] &&
+         g_hudChain.width > 0 && g_menuRect[2] > g_menuRect[0];
+}
+
+// What the hand panel shows (`rect`) and the part of it that keeps its place on the hand (`base`).
+void HandPanelRects(const float*& base, const float*& rect) {
+  if (HandMenuActive()) {
+    base = g_menuBase;
+    rect = g_menuRect;
+    return;
+  }
+  if (g_handRect[2] <= g_handRect[0]) std::copy(g_settings.handHudRect, g_settings.handHudRect + 4, g_handRect);
+  base = g_settings.handHudRect;
+  rect = g_handRect;
+}
+
 Pose HandPanelRel(float& width, float& height) {
   const Pose& h = g_handRel[OffHand()];
-  const float tilt = g_settings.handHudTiltDeg * 3.14159265f / 180.0f;
+  const bool window = HandMenuActive();
+  const float tilt = (window ? g_settings.handMenuTiltDeg : g_settings.handHudTiltDeg) * 3.14159265f / 180.0f;
   const Quat up{-std::sin(tilt * 0.5f), 0, 0, std::cos(tilt * 0.5f)};  // its face turns from you (+Z) to up (+Y)
-  const float* bar = g_settings.handHudRect;
-  if (g_handRect[2] <= g_handRect[0]) std::copy(bar, bar + 4, g_handRect);  // before the first frame
-  const float* r = g_handRect;
+  const float *base, *r;
+  HandPanelRects(base, r);
   const float W = float(g_hudChain.width), H = float(g_hudChain.height);
-  const float metresPerPx = g_settings.handHudWidth / std::max(1.0f, (bar[2] - bar[0]) * W);
+  const float metresPerPx = window ? g_settings.handMenuSize / std::max(1.0f, H)
+                                   : g_settings.handHudWidth / std::max(1.0f, (base[2] - base[0]) * W);
   width = (r[2] - r[0]) * W * metresPerPx;
   height = (r[3] - r[1]) * H * metresPerPx;
-  // Panel centre relative to the bar's centre (image y points down).
-  const float dx = ((r[0] + r[2]) - (bar[0] + bar[2])) * 0.5f * W * metresPerPx;
-  const float dy = -((r[1] + r[3]) - (bar[1] + bar[3])) * 0.5f * H * metresPerPx;
+  // Panel centre relative to the base's centre (image y points down).
+  const float dx = ((r[0] + r[2]) - (base[0] + base[2])) * 0.5f * W * metresPerPx;
+  float dy = -((r[1] + r[3]) - (base[1] + base[3])) * 0.5f * H * metresPerPx;
+  // A window stands on the hand: its bottom edge at handMenuUp.
+  if (window) dy += (base[3] - base[1]) * 0.5f * H * metresPerPx;
   const Quat q = h.orientation * up;
-  return {q, h.position + Rotate(h.orientation, {0, g_settings.handHudUp, g_settings.handHudBack}) + Rotate(q, {dx, dy, 0})};
+  const Vec3 offset = window ? Vec3{0, g_settings.handMenuUp, g_settings.handHudBack}
+                             : Vec3{0, g_settings.handHudUp, g_settings.handHudBack};
+  return {q, h.position + Rotate(h.orientation, offset) + Rotate(q, {dx, dy, 0})};
+}
+
+// The floating panel's parts (image rects u0 v0 u1 v1): all of it, without the bottom bar while that is on
+// the hand, or around the window that is on the hand. Returns how many.
+int FloatingRects(float (*out)[4]) {
+  const float crop = FloatingCrop();
+  if (!HandMenuActive()) {
+    const float all[4] = {0, 0, 1, crop};
+    std::copy(all, all + 4, out[0]);
+    return 1;
+  }
+  const float* m = g_menuRect;
+  const float parts[4][4] = {{0, 0, m[0], crop}, {m[2], 0, 1, crop}, {m[0], 0, m[2], m[1]}, {m[0], m[3], m[2], crop}};
+  int n = 0;
+  for (const auto& p : parts)
+    if (p[2] - p[0] > 0.002f && p[3] - p[1] > 0.002f) std::copy(p, p + 4, out[n++]);
+  return n;
 }
 
 void EndFrame() {
   XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-  XrCompositionLayerQuad hudQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  XrCompositionLayerQuad hudQuads[4];
   XrCompositionLayerQuad handQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
   XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   XrCompositionLayerProjectionView pv[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
@@ -626,7 +755,7 @@ void EndFrame() {
       layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&proj));
 
       // HUD: the game drew only its UI onto the cleared back buffer; show it on a floating panel.
-      mirror::Panel panels[2];
+      mirror::Panel panels[5];
       int panelCount = 0;
       if (g_settings.hud && g_hudPrepared) {
         sky::OnHudFrame(g_gameSwapChain);  // Devotion screen capture (UI layer, before the HUD pass)
@@ -642,25 +771,34 @@ void EndFrame() {
           const float tilt = -g_settings.hudTiltDeg * 3.14159265f / 180.0f;
           const Quat pitch{std::sin(tilt * 0.5f), 0, 0, std::cos(tilt * 0.5f)};
           const Quat yaw = g_ref.orientation;
-          hudQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
-          hudQuad.space = g_localSpace;
-          hudQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-          hudQuad.subImage.swapchain = g_hudChain.handle;
-          // The floating panel (without the bottom bar while it is on the hand; its top edge stays in place).
-          const float crop = FloatingCrop();
+          // The floating panel, in parts around what is on the hand (each part keeps its place in the panel).
           const float fullH = g_settings.hudWidth * float(g_hudChain.height) / float(std::max(1u, g_hudChain.width));
-          const Vec3 shift = Rotate(pitch, {0, (fullH - fullH * crop) * 0.5f, 0});
-          hudQuad.subImage.imageRect = {{0, 0}, {int32_t(g_hudChain.width), int32_t(float(g_hudChain.height) * crop)}};
-          hudQuad.pose = ToXr({yaw * pitch, g_ref.position + Rotate(yaw, Vec3{0, -g_settings.hudDown, -g_settings.hudDistance} + shift)});
-          hudQuad.size = {g_settings.hudWidth, fullH * crop};
-          layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&hudQuad));
-          panels[panelCount++] = {ToPose(hudQuad.pose), hudQuad.size.width, hudQuad.size.height, {0, 0, 1, crop}};
-          // The bottom bar on the off hand: the same HUD image, just its rectangle.
-          if (HandHudActive()) {
-            UpdateHandRect();
+          float parts[4][4];
+          const int partCount = FloatingRects(parts);
+          for (int i = 0; i < partCount; ++i) {
+            const float* p = parts[i];
+            XrCompositionLayerQuad& q = hudQuads[i];
+            q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+            q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            q.space = g_localSpace;
+            q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            q.subImage.swapchain = g_hudChain.handle;
+            q.subImage.imageRect = {{int32_t(p[0] * g_hudChain.width), int32_t(p[1] * g_hudChain.height)},
+                                    {int32_t((p[2] - p[0]) * g_hudChain.width), int32_t((p[3] - p[1]) * g_hudChain.height)}};
+            const Vec3 shift = Rotate(pitch, {((p[0] + p[2]) * 0.5f - 0.5f) * g_settings.hudWidth,
+                                              (0.5f - (p[1] + p[3]) * 0.5f) * fullH, 0});
+            q.pose = ToXr({yaw * pitch, g_ref.position + Rotate(yaw, Vec3{0, -g_settings.hudDown, -g_settings.hudDistance} + shift)});
+            q.size = {(p[2] - p[0]) * g_settings.hudWidth, (p[3] - p[1]) * fullH};
+            layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&q));
+            panels[panelCount++] = {ToPose(q.pose), q.size.width, q.size.height, {p[0], p[1], p[2], p[3]}};
+          }
+          // The bottom bar or a player window on the off hand: the same HUD image, just its rectangle.
+          if (HandHudActive() || HandMenuActive()) {
+            if (!HandMenuActive()) UpdateHandRect();
             float w, h;
             const Pose rel = HandPanelRel(w, h);
-            const float* r = g_handRect;
+            const float *base, *r;
+            HandPanelRects(base, r);
             handQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
             handQuad.space = g_localSpace;
             handQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
@@ -789,7 +927,9 @@ void LogGpuMemory() {
   if (adapter) adapter->Release();
   if (dxgi) dxgi->Release();
   const HRESULT removed = g_device->GetDeviceRemovedReason();
-  if (removed != S_OK) Log("gpu: device lost (reason 0x%08lX)", static_cast<unsigned long>(removed));
+  if (removed != S_OK)
+    Log("gpu: device lost (reason 0x%08lX), camera last turned %.1f s before", static_cast<unsigned long>(removed),
+        pointer::SecondsSinceTurn());
 }
 
 void OnPresent(IDXGISwapChain* swapChain) {
@@ -907,12 +1047,16 @@ bool HudPanelRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distanc
   u = Dot(local, axisX) / width + 0.5f;
   v = (0.5f - Dot(local, axisY) / height) * crop;  // in the whole HUD image
   distance = t;
+  // The window that is on the hand leaves a gap in the floating panel.
+  const float* m = g_menuRect;
+  if (HandMenuActive() && u >= m[0] && u <= m[2] && v >= m[1] && v <= m[3]) return false;
   return u >= 0 && u <= 1 && v >= 0 && v <= crop;
 }
 
 bool HandHudRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distance) {
   std::lock_guard lock(g_mutex);
-  if (!HandHudActive()) return false;
+  const bool window = HandMenuActive();
+  if (!window && !HandHudActive()) return false;
   float w, h;
   const Pose p = HandPanelRel(w, h);
   const Vec3 axisX = Rotate(p.orientation, {1, 0, 0}), axisY = Rotate(p.orientation, {0, 1, 0});
@@ -924,11 +1068,13 @@ bool HandHudRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distance
   const Vec3 local = originRel + dirRel * t - p.position;
   const float lu = Dot(local, axisX) / w + 0.5f, lv = 0.5f - Dot(local, axisY) / h;
   if (lu < 0 || lu > 1 || lv < 0 || lv > 1) return false;
-  const float* r = g_handRect;
-  // Over the grown part (a flyout) only where it shows something; the bar itself always catches the laser.
-  const float* bar = g_settings.handHudRect;
+  const float *base, *r;
+  HandPanelRects(base, r);
+  // Over the grown part (a flyout, a tooltip) only where it shows something; the bar or window itself always
+  // catches the laser.
   const float fu = r[0] + lu * (r[2] - r[0]), fv = r[1] + lv * (r[3] - r[1]);
-  if (fu < bar[0] && mask::HudAlphaAt(fu, fv) < 0.08f) return false;
+  const bool inBase = fu >= base[0] && fu <= base[2] && fv >= base[1] && fv <= base[3];
+  if (!inBase && mask::HudAlphaAt(fu, fv) < 0.08f) return false;
   u = r[0] + lu * (r[2] - r[0]);  // in the whole HUD image
   v = r[1] + lv * (r[3] - r[1]);
   distance = t;
@@ -937,8 +1083,9 @@ bool HandHudRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distance
 
 bool HudSolidAt(float u, float v, bool sticky) {
   std::lock_guard lock(g_mutex);
-  // A menu is open: the whole panel catches the pointer (no falling through gaps in a menu).
-  if (g_hudMenuOpen) return true;
+  // A menu is open: the whole panel catches the pointer (no falling through gaps in a menu), unless the
+  // window is on the hand (the floating panel is then the playing HUD around it).
+  if (g_hudMenuOpen && !HandMenuActive()) return true;
   // The minimap & quest block never catches the pointer.
   const float left = 1.0f - g_settings.hudSideWidth - g_settings.hudSideShift;
   if (u >= left && u <= left + g_settings.hudSideWidth && v <= g_settings.hudSideHeight) return false;
@@ -949,6 +1096,10 @@ bool HudSolidAt(float u, float v, bool sticky) {
 
 bool HudMenuOpen() {
   return g_hudMenuOpen.load();  // no lock: also called from code that runs while g_mutex is held
+}
+
+bool HandMenuOpen() {
+  return g_handMenu.load();  // no lock, like HudMenuOpen
 }
 
 IDXGISwapChain* GameSwapChain() { return g_gameSwapChain; }
@@ -1200,6 +1351,7 @@ void DrawDebugUI() {
     ImGui::RadioButton("Left hand", &g_settings.pointerHand, 0);
     ImGui::SameLine();
     ImGui::RadioButton("Right hand", &g_settings.pointerHand, 1);
+    ImGui::SliderFloat("Stick turn speed (deg/s)", &g_settings.stickTurnDegPerSec, 30.0f, 240.0f, "%.0f");
   }
 
   if (ImGui::CollapsingHeader("Sky (constellations)")) {
@@ -1237,6 +1389,11 @@ void DrawDebugUI() {
     ImGui::SliderFloat("Towards you (m)", &g_settings.handHudBack, -0.15f, 0.25f, "%.2f");
     ImGui::SliderFloat("Tilt up (deg)", &g_settings.handHudTiltDeg, -30.0f, 90.0f, "%.0f");
     ImGui::SliderFloat4("Bar in the HUD L T R B", g_settings.handHudRect, 0.0f, 1.0f, "%.2f");
+    ImGui::Checkbox("Player windows on the off hand (inventory, character, skills...)", &g_settings.handMenus);
+    ImGui::SliderFloat("Window size (m for the HUD's height)", &g_settings.handMenuSize, 0.2f, 1.2f, "%.2f");
+    ImGui::SliderFloat("Window above the controller (m)", &g_settings.handMenuUp, -0.1f, 0.2f, "%.2f");
+    ImGui::SliderFloat("Window tilt up (deg)", &g_settings.handMenuTiltDeg, -30.0f, 90.0f, "%.0f");
+    ImGui::SliderFloat("Widest window on the hand (share of the HUD)", &g_settings.handMenuMaxWidth, 0.2f, 1.0f, "%.2f");
   }
 
   if (ImGui::CollapsingHeader("Desktop mirror (recording)")) {

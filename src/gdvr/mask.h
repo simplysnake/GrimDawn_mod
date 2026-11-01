@@ -99,6 +99,15 @@ float HudAlphaAt(float u, float v);
 float HudContentCoverage(const float (*skipRects)[4], int rectCount, const float (*skip)[2], int skipCount,
                          float skipRadius);
 bool HudContentBounds(const float region[4], const float (*skip)[2], int skipCount, float skipRadius, float out[4]);
+// Player menus on the hand: the bounding box (fractions) of what the HUD shows now that it didn't show
+// before the menu opened. `remember` (no menu open): keep the current image as that reference (the one
+// from half a second ago is used, so a menu fading in isn't in it). Only columns where at least
+// `minColumn` (share of the rows) is new count, so small things (buff icons, the cursor) don't widen it;
+// cells inside the `skipRects` never count. With an `anchor` (u0 v0 u1 v1, may be null), only the window
+// overlapping it (its run of columns) counts, not separate ones next to it. False if nothing (or while
+// remembering, or nothing overlaps the anchor).
+bool HudNewContentBounds(bool remember, const float (*skipRects)[4], int rectCount, float minColumn,
+                         const float* anchor, float out[4]);
 // Share (0..1) of a HUD region (fractions of the image) where something is drawn, or -1 if not measured yet.
 float HudRegionCoverage(float u0, float v0, float u1, float v1);
 

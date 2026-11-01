@@ -822,6 +822,11 @@ void PollControlFile() {
   vr.handHudRect[1] = getFloat(L"hand_hud_top", vr.handHudRect[1]);
   vr.handHudRect[2] = getFloat(L"hand_hud_right", vr.handHudRect[2]);
   vr.handHudRect[3] = getFloat(L"hand_hud_bottom", vr.handHudRect[3]);
+  vr.handMenus = getInt(L"hand_menus", vr.handMenus) != 0;
+  vr.handMenuSize = getFloat(L"hand_menu_size", vr.handMenuSize);
+  vr.handMenuMaxWidth = getFloat(L"hand_menu_max_width", vr.handMenuMaxWidth);
+  vr.handMenuUp = getFloat(L"hand_menu_up", vr.handMenuUp);
+  vr.handMenuTiltDeg = getFloat(L"hand_menu_tilt", vr.handMenuTiltDeg);
   vr.mirror = getInt(L"mirror", vr.mirror) != 0;
   vr.mirrorFovDeg = getFloat(L"mirror_fov", vr.mirrorFovDeg);
   vr.sky = getInt(L"sky", vr.sky) != 0;
@@ -851,6 +856,7 @@ void PollControlFile() {
   vr.itemLabels3d = getInt(L"item_labels_3d", vr.itemLabels3d) != 0;
   vr.pointer = getInt(L"pointer", vr.pointer) != 0;
   vr.pointerHand = getInt(L"pointer_hand", vr.pointerHand) != 0 ? 1 : 0;
+  vr.stickTurnDegPerSec = getFloat(L"stick_turn_speed", vr.stickTurnDegPerSec);
   vr.pureController = getInt(L"pure_controller", vr.pureController) != 0;
   vr.hudSideOutline = getInt(L"hud_side_outline", vr.hudSideOutline) != 0;
   vr.hudBrightness = getFloat(L"hud_brightness", vr.hudBrightness);

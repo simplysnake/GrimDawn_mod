@@ -32,6 +32,13 @@ struct Settings {
   float handHudBack = 0.03f;    // metres towards you
   float handHudTiltDeg = 45.0f; // 0 = facing you, 90 = facing up
   float handHudRect[4] = {0.31f, 0.87f, 0.69f, 1.0f};  // the bar in the HUD image (left, top, right, bottom)
+  // Player windows (inventory, character, skills...) on the off hand; wider ones (Devotion, the map, two
+  // windows side by side) stay on the floating panel.
+  bool handMenus = true;
+  float handMenuSize = 0.70f;     // metres for the whole HUD image's height (a window is a part of it)
+  float handMenuMaxWidth = 0.55f; // windows up to this share of the HUD image's width go on the hand
+  float handMenuUp = 0.04f;       // metres from the controller to the window's bottom edge
+  float handMenuTiltDeg = 30.0f;  // 0 = facing you, 90 = facing up
   bool titleCutout = true;       // title screen: the character picture stands in the 3D scene
   bool mirror = true;            // the game window shows the left eye with the HUD (for recording/streaming)
   float mirrorFovDeg = 90.0f;    // ...cropped to this horizontal field of view
@@ -74,6 +81,7 @@ struct Settings {
   bool hudSideOutline = false;
   bool pointer = true;           // controller laser pointer
   int pointerHand = 1;           // 0 left, 1 right
+  float stickTurnDegPerSec = 120.0f;  // camera turn with the pointer-hand stick at full push
   bool pureController = false;   // VR controllers as a gamepad (game's gamepad mode, no laser)
   bool itemLabels3d = true;      // item names drawn by the mod in 3D at the item
   bool damageNumbers3d = true;   // damage numbers drawn by the mod in 3D (true depth) instead of the flat UI
@@ -111,7 +119,8 @@ bool HandAim(int hand, Pose& pose);
 // Where a ray (recentred space, unit direction) hits the HUD panel: image fractions and distance (m).
 bool HudPanelRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distance);
 
-// The same for the hand HUD (the bottom bar on the off hand), when it is shown; u, v in the whole HUD image.
+// The same for the hand HUD (the bottom bar or a player window on the off hand), when it is shown; u, v in
+// the whole HUD image.
 bool HandHudRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distance);
 
 // Whether the HUD shows something at this image position that should catch the pointer (`sticky`:
@@ -120,6 +129,8 @@ bool HudSolidAt(float u, float v, bool sticky = false);
 
 // A game menu (inventory, skills, options...) is open, judged from HUD coverage.
 bool HudMenuOpen();
+// That menu's window is on the off hand (not on the floating panel).
+bool HandMenuOpen();
 void RequestRecenter();
 
 // Writes the current settings to %LOCALAPPDATA%\gdvr\control.ini (section [vr]).

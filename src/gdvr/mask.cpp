@@ -843,6 +843,88 @@ bool HudContentBounds(const float region[4], const float (*skip)[2], int skipCou
   return true;
 }
 
+bool HudNewContentBounds(bool remember, const float (*skipRects)[4], int rectCount, float minColumn,
+                         const float* anchor, float out[4]) {
+  static std::vector<uint8_t> recent, reference;  // drawn cells (grown by one), the reference half a second older
+  static ULONGLONG recentAt = 0;
+  std::lock_guard lock(g_hudMeter.gridMutex);
+  const UINT w = g_hudMeter.gridW, h = g_hudMeter.gridH;
+  if (g_hudMeter.grid.empty() || !w || !h) return false;
+  if (remember) {
+    if (GetTickCount64() - recentAt < 500) return false;
+    recentAt = GetTickCount64();
+    reference.swap(recent);
+    recent.assign(size_t(w) * h, 0);
+    for (UINT y = 0; y < h; ++y)
+      for (UINT x = 0; x < w; ++x) {
+        if (g_hudMeter.grid[size_t(y) * w + x] <= 77) continue;  // alpha > 0.3
+        for (UINT yy = y ? y - 1 : 0; yy <= std::min(h - 1, y + 1); ++yy)
+          for (UINT xx = x ? x - 1 : 0; xx <= std::min(w - 1, x + 1); ++xx) recent[size_t(yy) * w + xx] = 1;
+      }
+    return false;
+  }
+  const std::vector<uint8_t>& ref = reference.size() == size_t(w) * h ? reference : recent;
+  if (ref.size() != size_t(w) * h) return false;
+  auto isNew = [&](UINT x, UINT y) {
+    const size_t i = size_t(y) * w + x;
+    if (g_hudMeter.grid[i] <= 77 || ref[i]) return false;
+    const float u = (x + 0.5f) / w, v = (y + 0.5f) / h;
+    for (int k = 0; k < rectCount; ++k)
+      if (u >= skipRects[k][0] && u <= skipRects[k][2] && v >= skipRects[k][1] && v <= skipRects[k][3]) return false;
+    return true;
+  };
+  // Runs of neighbouring columns with enough new content (gaps up to 2 columns bridged): one window is one
+  // run. With an anchor, the run overlapping it is taken; without, all of them.
+  std::vector<UINT> count(w, 0);
+  for (UINT x = 0; x < w; ++x)
+    for (UINT y = 0; y < h; ++y) count[x] += isNew(x, y);
+  int bestX0 = -1, bestX1 = -1;
+  UINT bestSum = 0;
+  bool bestAnchored = false;
+  for (UINT x = 0; x < w;) {
+    if (count[x] < minColumn * h) {
+      ++x;
+      continue;
+    }
+    UINT x1 = x, sum = 0;
+    for (UINT k = x; k < w && k <= x1 + 3; ++k)
+      if (count[k] >= minColumn * h) {
+        x1 = k;
+        sum += count[k];
+      }
+    const bool anchored = anchor && (x1 + 1.0f) / w > anchor[0] && float(x) / w < anchor[2];
+    if ((anchored && !bestAnchored) || (anchored == bestAnchored && sum > bestSum)) {
+      bestX0 = int(x);
+      bestX1 = int(x1);
+      bestSum = sum;
+      bestAnchored = anchored;
+    }
+    x = x1 + 1;
+  }
+  if (bestX0 < 0 || (anchor && !bestAnchored)) return false;
+  if (!anchor) {
+    // No window yet: everything new counts, so a wide menu with gaps (the map) is judged by its full width.
+    for (bestX0 = 0; count[bestX0] < minColumn * h;) ++bestX0;
+    for (bestX1 = int(w) - 1; count[bestX1] < minColumn * h;) --bestX1;
+  }
+  float minV = 2, maxV = -1;
+  for (int x = bestX0; x <= bestX1; ++x) {
+    if (count[x] < minColumn * h) continue;
+    for (UINT y = 0; y < h; ++y)
+      if (isNew(UINT(x), y)) {
+        minV = std::min(minV, float(y) / h);
+        maxV = std::max(maxV, float(y + 1) / h);
+      }
+  }
+  const float minU = float(bestX0) / w, maxU = float(bestX1 + 1) / w;
+  if (maxV < 0) return false;
+  out[0] = minU;
+  out[1] = minV;
+  out[2] = maxU;
+  out[3] = maxV;
+  return true;
+}
+
 float HudAlphaAt(float u, float v) {
   std::lock_guard lock(g_hudMeter.gridMutex);
   if (g_hudMeter.grid.empty() || u < 0 || u > 1 || v < 0 || v > 1) return -1.0f;
