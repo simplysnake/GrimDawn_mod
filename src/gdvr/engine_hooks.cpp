@@ -16,6 +16,7 @@
 #include <cmath>
 
 #include "engine_api.h"
+#include "audio.h"
 #include "d3dtrace.h"
 #include "input.h"
 #include "labels.h"
@@ -408,6 +409,11 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
   auto toWorld = [&](Vec3 v) { return right * v.x + up * v.y + fwd * v.z; };
   labels::SetStereoFrame(origin, right, up, fwd, s.worldScale);  // for placing labels this frame
   numbers::OnStereoFrame();
+  {
+    const Quat head = xr::EyePose(0).orientation;  // both eyes turn together
+    audio::SetHeadFrame(right, up, fwd, toWorld(XrToCamera(Rotate(head, {1, 0, 0}))),
+                        toWorld(XrToCamera(Rotate(head, {0, 1, 0}))), toWorld(XrToCamera(Rotate(head, {0, 0, -1}))));
+  }
   {
     const float* t = g_cameraTarget(self);
     const bool haveTarget = t[kTargetPos] != 0 || t[kTargetPos + 1] != 0 || t[kTargetPos + 2] != 0;
@@ -825,7 +831,9 @@ void PollControlFile() {
   vr.handHudRect[2] = getFloat(L"hand_hud_right", vr.handHudRect[2]);
   vr.handHudRect[3] = getFloat(L"hand_hud_bottom", vr.handHudRect[3]);
   vr.handMenus = getInt(L"hand_menus", vr.handMenus) != 0;
+  vr.hideBarInMenus = getInt(L"hide_bar_in_menus", vr.hideBarInMenus) != 0;
   vr.controllerModels = getInt(L"controller_models", vr.controllerModels) != 0;
+  vr.headAudio = getInt(L"head_audio", vr.headAudio) != 0;
   vr.handMenuSize = getFloat(L"hand_menu_size", vr.handMenuSize);
   vr.handMenuMaxWidth = getFloat(L"hand_menu_max_width", vr.handMenuMaxWidth);
   vr.handMenuUp = getFloat(L"hand_menu_up", vr.handMenuUp);
@@ -939,6 +947,7 @@ bool Install() {
   perf::InstallStageHooks(engine);
   labels::Install(engine);
   numbers::Install(engine);
+  audio::Install(engine);
   return true;
 }
 

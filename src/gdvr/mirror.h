@@ -16,6 +16,7 @@ struct Panel {
   Pose pose;          // centre of the quad, facing +Z
   float width = 0, height = 0;
   float uv[4] = {};   // u0, v0, u1, v1 of the HUD image
+  bool hand = false;  // of the hand image instead (a player window split off the HUD)
 };
 
 // Keeps a copy of the eye image now in the back buffer (call after that eye is rendered).
@@ -23,9 +24,9 @@ void KeepEye(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* ba
 
 // Draws the kept eye into the back buffer, then the HUD that is in it now on the given panels, seen from
 // `eye` (the kept eye's pose in LOCAL space). tanX/tanY: the eye image's half field of view (tangents);
-// fovDeg: the mirror's horizontal field of view.
+// fovDeg: the mirror's horizontal field of view. handImage (may be null): the image of the panels marked `hand`.
 void Compose(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* backBuffer, const Pose& eye, float tanX,
-             float tanY, float fovDeg, const Panel* panels, int panelCount);
+             float tanY, float fovDeg, const Panel* panels, int panelCount, ID3D11Texture2D* handImage = nullptr);
 
 // Forgets the eye copy (e.g. a frame without stereo, so an old picture isn't shown).
 void Invalidate();

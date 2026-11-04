@@ -68,7 +68,7 @@ struct Copy {
   ID3D11Texture2D* tex = nullptr;
   ID3D11ShaderResourceView* srv = nullptr;
 };
-Copy g_eye, g_hud;
+Copy g_eye, g_hud, g_handCopy;
 bool g_haveEye = false;
 
 template <typename T>
@@ -223,9 +223,10 @@ void KeepEye(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* ba
 void Invalidate() { g_haveEye = false; }
 
 void Compose(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* backBuffer, const Pose& eye, float tanX,
-             float tanY, float fovDeg, const Panel* panels, int panelCount) {
+             float tanY, float fovDeg, const Panel* panels, int panelCount, ID3D11Texture2D* handImage) {
   if (!g_haveEye || tanX <= 0 || tanY <= 0 || !CreatePipeline(device)) return;
   if (panelCount > 0 && !CopyOf(device, ctx, backBuffer, g_hud)) panelCount = 0;
+  const bool haveHand = handImage && CopyOf(device, ctx, handImage, g_handCopy);
   D3D11_TEXTURE2D_DESC bd;
   backBuffer->GetDesc(&bd);
   ID3D11RenderTargetView* rtv = nullptr;
@@ -273,9 +274,10 @@ void Compose(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* ba
     ctx->VSSetShader(g_vsPanel, nullptr, 0);
     ctx->OMSetBlendState(g_premul, nullptr, 0xFFFFFFFF);
     ctx->PSSetShader(g_psHud, nullptr, 0);
-    ctx->PSSetShaderResources(0, 1, &g_hud.srv);
     for (int i = 0; i < panelCount; ++i) {
       const Panel& p = panels[i];
+      if (p.hand && !haveHand) continue;
+      ctx->PSSetShaderResources(0, 1, p.hand ? &g_handCopy.srv : &g_hud.srv);
       for (int c = 0; c < 4; ++c) {
         const Vec3 local{(c & 1 ? 0.5f : -0.5f) * p.width, (c & 2 ? -0.5f : 0.5f) * p.height, 0};
         const Vec3 e = Rotate(toEye, p.pose.position + Rotate(p.pose.orientation, local) - eye.position);
@@ -297,6 +299,7 @@ void Compose(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* ba
 void Shutdown() {
   Release(g_eye);
   Release(g_hud);
+  Release(g_handCopy);
   g_haveEye = false;
   SafeRelease(g_vs);
   SafeRelease(g_vsPanel);

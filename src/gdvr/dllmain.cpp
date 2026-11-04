@@ -7,6 +7,7 @@
 
 #include <MinHook.h>
 
+#include "audio.h"
 #include "d3dtrace.h"
 #include "engine_hooks.h"
 #include "input.h"
@@ -130,7 +131,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI GDVR_Shutdown(LPVOID) {
   MH_DisableHook(MH_ALL_HOOKS);
   // Wait until no thread is still executing inside one of our detours.
   for (int i = 0; i < 200 && (gdvr::engine::InFlight() || gdvr::overlay::InFlight() || gdvr::perf::InFlight() ||
-                              gdvr::mask::InFlight() || gdvr::input::InFlight() || gdvr::labels::InFlight() || gdvr::numbers::InFlight() || gdvr::pointer::InFlight() ||
+                              gdvr::mask::InFlight() || gdvr::input::InFlight() || gdvr::labels::InFlight() || gdvr::numbers::InFlight() || gdvr::pointer::InFlight() || gdvr::audio::InFlight() ||
                               gdvr::d3dtrace::InFlight()); ++i) Sleep(10);
   Sleep(50);  // also lets threads that were between the trampoline and the guard drain
   MH_Uninitialize();

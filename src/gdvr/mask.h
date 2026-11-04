@@ -9,6 +9,7 @@
 struct ID3D11DeviceContext;
 struct ID3D11RenderTargetView;
 struct ID3D11DepthStencilView;
+struct ID3D11Texture2D;
 struct IDXGISwapChain;
 
 namespace gdvr::mask {
@@ -91,6 +92,16 @@ struct HudLook {
 };
 bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look);
 
+// Player window on the hand, after FixHudAlpha. `remember` (no menu open): keep the HUD as it is as the
+// reference (the one from half a second before is used). Otherwise, with the window's rectangle `base` (and
+// the tooltip's, `tip`, may be null; fractions u0 v0 u1 v1): returns an image (owned by the mask, valid until
+// the next call) holding all of the window and what in `tip` differs from the reference, transparent elsewhere,
+// and changes the back buffer to show the reference there instead. Null if not split (remembering, no reference
+// yet, no `base`). `hide` (may be null; also without a window on the hand): left out of the back buffer except
+// what differs from the reference (the bottom bar while a menu is open, but not a menu reaching over it).
+ID3D11Texture2D* SplitHud(IDXGISwapChain* swapChain, bool remember, const float* base, const float* tip,
+                          const float* hide = nullptr);
+
 // Measures the average brightness of the current back buffer (an eye image) on the GPU; the
 // result arrives a few frames later. Call once per frame after an eye is rendered.
 void MeasureBrightness(IDXGISwapChain* swapChain);
@@ -114,11 +125,14 @@ bool HudContentBounds(const float region[4], const float (*skip)[2], int skipCou
 // before the menu opened. `remember` (no menu open): keep the current image as that reference (the one
 // from half a second ago is used, so a menu fading in isn't in it). Only columns where at least
 // `minColumn` (share of the rows) is new count, so small things (buff icons, the cursor) don't widen it;
-// cells inside the `skipRects` never count. With an `anchor` (u0 v0 u1 v1, may be null), only the window
-// overlapping it (its run of columns) counts, not separate ones next to it. False if nothing (or while
-// remembering, or nothing overlaps the anchor).
+// cells inside the `skipRects` never count. With an `anchor` (u0 v0 u1 v1, may be null): false unless a run
+// of such columns overlaps it (the window is still there); then the bounds are everything new connected to
+// the anchor or to the `cursor` (u v, may be null): a tooltip over or beside the window, however short,
+// followed down into a skip rect below it where it covers what was there before. False if nothing (or while
+// remembering). `tip` (may be null): with an anchor, the box of what of that lies outside the anchor (the
+// tooltip), all zero if nothing does.
 bool HudNewContentBounds(bool remember, const float (*skipRects)[4], int rectCount, float minColumn,
-                         const float* anchor, float out[4]);
+                         const float* anchor, const float* cursor, float out[4], float* tip = nullptr);
 // Share (0..1) of a HUD region (fractions of the image) where something is drawn, or -1 if not measured yet.
 float HudRegionCoverage(float u0, float v0, float u1, float v1);
 

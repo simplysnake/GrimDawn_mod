@@ -35,11 +35,13 @@ struct Settings {
   // Player windows (inventory, character, skills...) on the off hand; wider ones (Devotion, the map, two
   // windows side by side) stay on the floating panel.
   bool handMenus = true;
+  bool hideBarInMenus = true;     // the bottom bar (skills, globes) left out while a menu is open
   float handMenuSize = 0.70f;     // metres for the whole HUD image's height (a window is a part of it)
   float handMenuMaxWidth = 0.55f; // windows up to this share of the HUD image's width go on the hand
   float handMenuUp = 0.04f;       // metres from the controller to the window's bottom edge
   float handMenuTiltDeg = 30.0f;  // 0 = facing you, 90 = facing up
   bool controllerModels = true;   // SteamVR's controller models drawn at the controllers
+  bool headAudio = true;          // the game's sound listener turns with the head
   bool titleCutout = true;       // title screen: the character picture stands in the 3D scene
   bool mirror = true;            // the game window shows the left eye with the HUD (for recording/streaming)
   float mirrorFovDeg = 90.0f;    // ...cropped to this horizontal field of view

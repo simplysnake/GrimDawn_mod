@@ -654,6 +654,7 @@ struct Meter {
   UINT gridW = 0, gridH = 0;
   std::mutex gridMutex;
   std::vector<uint8_t> grid;  // alpha per grid cell, under gridMutex
+  std::vector<uint8_t> shade;  // max(r, g, b) per grid cell, under gridMutex
 
   void Release() {
     SafeRelease(gridStaging);
@@ -737,11 +738,14 @@ struct Meter {
         if (ctx->Map(gridStaging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped) == S_OK) {
           std::lock_guard lock(gridMutex);
           grid.resize(size_t(gridW) * gridH);
+          shade.resize(size_t(gridW) * gridH);
           for (UINT y = 0; y < gridH; ++y) {
             const auto* row = static_cast<const uint8_t*>(mapped.pData) + size_t(y) * mapped.RowPitch;
-            for (UINT x = 0; x < gridW; ++x)
-              grid[size_t(y) * gridW + x] =
-                  gridBrightness ? std::max(row[x * 4], std::max(row[x * 4 + 1], row[x * 4 + 2])) : row[x * 4 + 3];
+            for (UINT x = 0; x < gridW; ++x) {
+              const uint8_t bright = std::max(row[x * 4], std::max(row[x * 4 + 1], row[x * 4 + 2]));
+              grid[size_t(y) * gridW + x] = gridBrightness ? bright : row[x * 4 + 3];
+              shade[size_t(y) * gridW + x] = bright;
+            }
           }
           ctx->Unmap(gridStaging, 0);
           gridPending = false;
@@ -844,8 +848,11 @@ bool HudContentBounds(const float region[4], const float (*skip)[2], int skipCou
 }
 
 bool HudNewContentBounds(bool remember, const float (*skipRects)[4], int rectCount, float minColumn,
-                         const float* anchor, float out[4]) {
+                         const float* anchor, const float* cursor, float out[4], float* tip) {
+  if (tip) std::fill_n(tip, 4, 0.0f);
   static std::vector<uint8_t> recent, reference;  // drawn cells (grown by one), the reference half a second older
+  // The same images as they were (alpha, brightness): where something new covers what was already drawn.
+  static std::vector<uint8_t> recentAlpha, referenceAlpha, recentShade, referenceShade;
   static ULONGLONG recentAt = 0;
   std::lock_guard lock(g_hudMeter.gridMutex);
   const UINT w = g_hudMeter.gridW, h = g_hudMeter.gridH;
@@ -854,6 +861,10 @@ bool HudNewContentBounds(bool remember, const float (*skipRects)[4], int rectCou
     if (GetTickCount64() - recentAt < 500) return false;
     recentAt = GetTickCount64();
     reference.swap(recent);
+    referenceAlpha.swap(recentAlpha);
+    referenceShade.swap(recentShade);
+    recentAlpha = g_hudMeter.grid;
+    recentShade = g_hudMeter.shade;
     recent.assign(size_t(w) * h, 0);
     for (UINT y = 0; y < h; ++y)
       for (UINT x = 0; x < w; ++x) {
@@ -902,7 +913,109 @@ bool HudNewContentBounds(bool remember, const float (*skipRects)[4], int rectCou
     x = x1 + 1;
   }
   if (bestX0 < 0 || (anchor && !bestAnchored)) return false;
-  if (!anchor) {
+  if (anchor) {
+    // The window is still there. Take everything new connected to it or next to the cursor (a tooltip over or
+    // beside the window, however short: a column test misses those), cells up to four apart counting as
+    // connected (a tooltip can stand a little away from the window).
+    constexpr UINT kBridge = 4;
+    std::vector<uint8_t> in(size_t(w) * h, 0);
+    std::vector<UINT> stack;
+    auto seed = [&](float u0, float v0, float u1, float v1) {
+      const UINT x0 = UINT(std::clamp(u0, 0.0f, 1.0f) * w), x1 = std::min(w, UINT(std::clamp(u1, 0.0f, 1.0f) * w + 1));
+      const UINT y0 = UINT(std::clamp(v0, 0.0f, 1.0f) * h), y1 = std::min(h, UINT(std::clamp(v1, 0.0f, 1.0f) * h + 1));
+      for (UINT y = y0; y < y1; ++y)
+        for (UINT x = x0; x < x1; ++x)
+          if (!in[size_t(y) * w + x] && isNew(x, y)) {
+            in[size_t(y) * w + x] = 1;
+            stack.push_back(y * w + x);
+          }
+    };
+    seed(anchor[0], anchor[1], anchor[2], anchor[3]);
+    if (cursor) seed(cursor[0] - 0.03f, cursor[1] - 0.05f, cursor[0] + 0.03f, cursor[1] + 0.05f);
+    UINT minX = w, minY = h, maxX = 0, maxY = 0;
+    while (!stack.empty()) {
+      const UINT i = stack.back();
+      stack.pop_back();
+      const UINT x = i % w, y = i / w;
+      minX = std::min(minX, x);
+      maxX = std::max(maxX, x);
+      minY = std::min(minY, y);
+      maxY = std::max(maxY, y);
+      for (UINT yy = y >= kBridge ? y - kBridge : 0; yy <= std::min(h - 1, y + kBridge); ++yy)
+        for (UINT xx = x >= kBridge ? x - kBridge : 0; xx <= std::min(w - 1, x + kBridge); ++xx) {
+          const size_t j = size_t(yy) * w + xx;
+          if (in[j] || !isNew(xx, yy)) continue;
+          in[j] = 1;
+          stack.push_back(UINT(j));
+        }
+    }
+    if (minX > maxX) return false;
+    // The part outside the window (a tooltip): its own box.
+    const UINT ax0 = UINT(std::clamp(anchor[0], 0.0f, 1.0f) * w), ax1 = UINT(std::clamp(anchor[2], 0.0f, 1.0f) * w + 0.999f);
+    const UINT ay0 = UINT(std::clamp(anchor[1], 0.0f, 1.0f) * h), ay1 = UINT(std::clamp(anchor[3], 0.0f, 1.0f) * h + 0.999f);
+    UINT tx0 = w, ty0 = h, tx1 = 0, ty1 = 0;
+    for (UINT y = minY; y <= maxY; ++y)
+      for (UINT x = minX; x <= maxX; ++x)
+        if (in[size_t(y) * w + x] && (x < ax0 || x >= ax1 || y < ay0 || y >= ay1)) {
+          tx0 = std::min(tx0, x);
+          tx1 = std::max(tx1, x);
+          ty0 = std::min(ty0, y);
+          ty1 = std::max(ty1, y);
+        }
+    // A tooltip running into a left-out area below it (the bottom bar, which changes all the time): follow it
+    // down through the rows where much of its width looks different from before the menu opened (the bar under
+    // it, drawn before too, counts only where the tooltip covers it); a few rows that don't (a dark band of the
+    // bar under a dark tooltip) are passed over.
+    const bool haveBefore = referenceAlpha.size() == size_t(w) * h && referenceShade.size() == size_t(w) * h &&
+                            g_hudMeter.shade.size() == size_t(w) * h;
+    auto covered = [&](UINT x, UINT y) {
+      const size_t i = size_t(y) * w + x;
+      if (g_hudMeter.grid[i] <= 77) return false;
+      return std::abs(int(g_hudMeter.shade[i]) - int(referenceShade[i])) > 24 ||
+             std::abs(int(g_hudMeter.grid[i]) - int(referenceAlpha[i])) > 48;
+    };
+    for (int k = 0; k < rectCount; ++k) {
+      const UINT top = UINT(std::clamp(skipRects[k][1], 0.0f, 1.0f) * h);
+      if (!haveBefore || top == 0 || top >= h || maxY + 3 < top) continue;
+      const UINT sx0 = UINT(std::clamp(skipRects[k][0], 0.0f, 1.0f) * w), sx1 = std::min(w, UINT(skipRects[k][2] * w + 1));
+      UINT c0 = w, c1 = 0;  // the connected shape's columns in the rows just above the area
+      for (UINT y = top >= 3 ? top - 3 : 0; y < top; ++y)
+        for (UINT x = std::max(sx0, minX); x < std::min(sx1, maxX + 1); ++x)
+          if (in[size_t(y) * w + x]) {
+            c0 = std::min(c0, x);
+            c1 = std::max(c1, x);
+          }
+      if (c0 > c1) continue;
+      UINT misses = 0;
+      for (UINT y = top; y < h && misses < 5; ++y) {
+        UINT changed = 0;
+        for (UINT x = c0; x <= c1; ++x) changed += covered(x, y);
+        if (changed * 10 < (c1 - c0 + 1) * 4) {
+          ++misses;
+          continue;
+        }
+        misses = 0;
+        maxY = std::max(maxY, y);
+        minX = std::min(minX, c0);
+        maxX = std::max(maxX, c1);
+        tx0 = std::min(tx0, c0);
+        tx1 = std::max(tx1, c1);
+        ty0 = std::min(ty0, y);
+        ty1 = std::max(ty1, y);
+      }
+    }
+    out[0] = float(minX) / w;
+    out[1] = float(minY) / h;
+    out[2] = float(maxX + 1) / w;
+    out[3] = float(maxY + 1) / h;
+    if (tip) {
+      const float none[4] = {};
+      const float box[4] = {float(tx0) / w, float(ty0) / h, float(tx1 + 1) / w, float(ty1 + 1) / h};
+      std::copy_n(tx0 <= tx1 ? box : none, 4, tip);
+    }
+    return true;
+  }
+  {
     // No window yet: everything new counts, so a wide menu with gaps (the map) is judged by its full width.
     for (bestX0 = 0; count[bestX0] < minColumn * h;) ++bestX0;
     for (bestX1 = int(w) - 1; count[bestX1] < minColumn * h;) --bestX1;
@@ -1017,6 +1130,274 @@ bool FixHudAlpha(IDXGISwapChain* swapChain, const HudLook& look) {
   }
   bb->Release();
   return ok;
+}
+
+namespace {
+
+// ---- Player window on the hand: the HUD split by pixel ------------------------------------------------
+// What differs from the HUD before the menu opened goes to the hand image; the floating panel shows the HUD
+// as it was there instead (the bar under a tooltip), and as it is everywhere else.
+constexpr char kSplitShader[] = R"(
+// Pixels x0 y0 x1 y1; opt.x: difference threshold, opt.y: the same over the bottom bar (average around), opt.z:
+// how much of the motion stays from one frame to the next, opt.w: most motion that still counts as still;
+// hide: the bottom bar, left out of the floating panel and taken by the tooltip only where it covers it.
+cbuffer C : register(b0) { float4 base; float4 tip; float4 opt; float4 hide; };
+Texture2D<float4> cur : register(t0);
+Texture2D<float4> ref : register(t1);
+Texture2D<float4> prev : register(t2);   // the HUD a frame before
+Texture2D<float> motion : register(t3);  // how much it has been moving lately (bottom bar only)
+struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+bool Inside(float2 p, float4 r) { return p.x >= r.x && p.y >= r.y && p.x < r.z && p.y < r.w; }
+float Diff(int2 p) {
+  float4 d = abs(cur.Load(int3(p, 0)) - ref.Load(int3(p, 0)));
+  return max(max(d.r, d.g), max(d.b, d.a));
+}
+// What changed, a few pixels widened (soft edges, a pixel that happens to match).
+bool Changed(float2 pos) {
+  int2 p = int2(pos);
+  float m = 0;
+  [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x) m = max(m, Diff(p + int2(x, y) * 3));
+  return m > opt.x;
+}
+// Over the bottom bar: changed a lot all around (a tooltip covering it), not just here and there, and holding
+// still (the globes' liquid keeps moving; a tooltip doesn't).
+bool CoveredOver(float2 pos) {
+  int2 p = int2(pos);
+  float sum = 0;
+  [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x) sum += Diff(p + int2(x, y) * 2);
+  return sum / 9 > opt.y && motion.Load(int3(p, 0)) < opt.w;
+}
+// Motion over the bottom bar: the change since the frame before (a few pixels around), fading out over frames.
+float PSMotion(VSOut i) : SV_Target {
+  if (!Inside(i.pos.xy, hide)) return 0;
+  int2 p = int2(i.pos.xy);
+  float m = 0;
+  [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x) {
+      int3 q = int3(p + int2(x, y) * 2, 0);
+      float4 d = abs(cur.Load(q) - prev.Load(q));
+      m = max(m, max(max(d.r, d.g), max(d.b, d.a)));
+    }
+  return max(m, motion.Load(int3(p, 0)) * opt.z);
+}
+// The window takes everything in its rectangle; around it (the tooltip's rectangle) what changed.
+bool New(float2 pos) {
+  if (Inside(pos, base)) return true;
+  if (!Inside(pos, tip)) return false;
+  return Inside(pos, hide) ? CoveredOver(pos) : Changed(pos);
+}
+float4 PSHand(VSOut i) : SV_Target { return New(i.pos.xy) ? cur.Load(int3(i.pos.xy, 0)) : float4(0, 0, 0, 0); }
+float4 PSFloat(VSOut i) : SV_Target {
+  int3 p = int3(i.pos.xy, 0);
+  bool n = New(i.pos.xy);
+  // The bottom bar while a menu is open: gone, apart from a menu reaching over it where the bar left the image
+  // empty (the bar itself changes all the time: the globes' liquid, its shadow following the daylight look).
+  if (Inside(i.pos.xy, hide)) {
+    float before = 0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+      [unroll] for (int x = -1; x <= 1; ++x) before = max(before, ref.Load(int3(p.xy + int2(x, y) * 3, 0)).a);
+    return n || before > 0.03 || !Changed(i.pos.xy) ? float4(0, 0, 0, 0) : cur.Load(p);
+  }
+  return n ? ref.Load(p) : cur.Load(p);
+}
+)";
+ID3D11PixelShader* g_splitHandPs = nullptr;
+ID3D11PixelShader* g_splitFloatPs = nullptr;
+ID3D11PixelShader* g_splitMotionPs = nullptr;
+ID3D11Buffer* g_splitCb = nullptr;
+struct SplitTex {
+  ID3D11Texture2D* tex = nullptr;
+  ID3D11ShaderResourceView* srv = nullptr;
+  ID3D11RenderTargetView* rtv = nullptr;
+};
+SplitTex g_splitRecent, g_splitReference, g_splitHand;  // HUD before the menu (the newer, the older), the hand image
+bool g_splitHaveRecent = false, g_splitHaveReference = false, g_splitFailed = false;
+ULONGLONG g_splitRecentAt = 0;
+SplitTex g_splitPrev, g_splitMotion[2];  // the HUD a frame before; motion over the bottom bar (this frame's, last)
+int g_splitMotionAt = 0;                 // which of g_splitMotion is written next
+bool g_splitHavePrev = false;
+
+void ReleaseSplitTex(SplitTex& t) {
+  SafeRelease(t.rtv);
+  SafeRelease(t.srv);
+  SafeRelease(t.tex);
+}
+
+void ReleaseSplit() {
+  SafeRelease(g_splitHandPs);
+  SafeRelease(g_splitFloatPs);
+  SafeRelease(g_splitMotionPs);
+  SafeRelease(g_splitCb);
+  ReleaseSplitTex(g_splitRecent);
+  ReleaseSplitTex(g_splitReference);
+  ReleaseSplitTex(g_splitHand);
+  ReleaseSplitTex(g_splitPrev);
+  ReleaseSplitTex(g_splitMotion[0]);
+  ReleaseSplitTex(g_splitMotion[1]);
+  g_splitHaveRecent = g_splitHaveReference = g_splitHavePrev = false;
+}
+
+bool EnsureSplitShaders() {
+  if (g_splitHandPs) return true;
+  if (g_splitFailed || !g_device) return false;
+  ID3DBlob *hand = nullptr, *flt = nullptr, *mot = nullptr, *err = nullptr;
+  auto compile = [&](const char* entry, ID3DBlob** out) {
+    return SUCCEEDED(D3DCompile(kSplitShader, sizeof(kSplitShader) - 1, "gdvr_split", nullptr, nullptr, entry, "ps_5_0", 0, 0,
+                                out, &err));
+  };
+  bool ok = compile("PSHand", &hand) && compile("PSFloat", &flt) && compile("PSMotion", &mot);
+  if (!ok && err) Log("hud split: shader: %s", static_cast<const char*>(err->GetBufferPointer()));
+  D3D11_BUFFER_DESC bd{64, D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
+  ok = ok && SUCCEEDED(g_device->CreatePixelShader(hand->GetBufferPointer(), hand->GetBufferSize(), nullptr, &g_splitHandPs)) &&
+       SUCCEEDED(g_device->CreatePixelShader(flt->GetBufferPointer(), flt->GetBufferSize(), nullptr, &g_splitFloatPs)) &&
+       SUCCEEDED(g_device->CreatePixelShader(mot->GetBufferPointer(), mot->GetBufferSize(), nullptr, &g_splitMotionPs)) &&
+       SUCCEEDED(g_device->CreateBuffer(&bd, nullptr, &g_splitCb));
+  SafeRelease(hand);
+  SafeRelease(flt);
+  SafeRelease(mot);
+  SafeRelease(err);
+  if (!ok) {
+    Log("hud split: unavailable (windows on the hand cut the floating panel instead)");
+    g_splitFailed = true;
+    ReleaseSplit();
+  }
+  return ok;
+}
+
+// `t` matching `desc` (size, format), with a view to read it and, if `target`, to draw into it.
+bool EnsureSplitTex(SplitTex& t, const D3D11_TEXTURE2D_DESC& desc, bool target) {
+  if (t.tex) {
+    D3D11_TEXTURE2D_DESC d;
+    t.tex->GetDesc(&d);
+    if (d.Width == desc.Width && d.Height == desc.Height && d.Format == desc.Format) return true;
+    ReleaseSplitTex(t);
+  }
+  D3D11_TEXTURE2D_DESC d = desc;
+  d.MipLevels = 1;
+  d.ArraySize = 1;
+  d.Usage = D3D11_USAGE_DEFAULT;
+  d.BindFlags = D3D11_BIND_SHADER_RESOURCE | (target ? D3D11_BIND_RENDER_TARGET : 0);
+  d.CPUAccessFlags = 0;
+  d.MiscFlags = 0;
+  const bool ok = SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &t.tex)) &&
+                  SUCCEEDED(g_device->CreateShaderResourceView(t.tex, nullptr, &t.srv)) &&
+                  (!target || SUCCEEDED(g_device->CreateRenderTargetView(t.tex, nullptr, &t.rtv)));
+  if (!ok) ReleaseSplitTex(t);
+  return ok;
+}
+
+}  // namespace
+
+ID3D11Texture2D* SplitHud(IDXGISwapChain* swapChain, bool remember, const float* base, const float* tip,
+                          const float* hide) {
+  if (!g_capturingAllowed || g_failed || !g_origOMSetRenderTargets || !swapChain || !g_device || !g_rtv) return nullptr;
+  ID3D11Texture2D* bb = nullptr;
+  if (FAILED(swapChain->GetBuffer(0, IID_PPV_ARGS(&bb)))) return nullptr;
+  D3D11_TEXTURE2D_DESC bbDesc;
+  bb->GetDesc(&bbDesc);
+  ID3D11DeviceContext* ctx = nullptr;
+  g_device->GetImmediateContext(&ctx);
+  ID3D11Texture2D* result = nullptr;
+  if (remember) {
+    // The HUD with no menu open, every half second; the older of the last two is the reference (a menu fading
+    // in isn't in it).
+    if (GetTickCount64() - g_splitRecentAt >= 500 && EnsureSplitTex(g_splitReference, bbDesc, false) &&
+        EnsureSplitTex(g_splitRecent, bbDesc, false)) {
+      g_splitRecentAt = GetTickCount64();
+      std::swap(g_splitRecent, g_splitReference);
+      g_splitHaveReference = g_splitHaveRecent;
+      ctx->CopyResource(g_splitRecent.tex, bb);
+      g_splitHaveRecent = true;
+    }
+    g_splitHavePrev = false;  // motion starts again with the next menu
+  } else if ((base || hide) && (g_splitHaveReference || g_splitHaveRecent) && g_hudCopySrv && EnsureSplitShaders() &&
+             (!base || EnsureSplitTex(g_splitHand, bbDesc, true))) {
+    const SplitTex& ref = g_splitHaveReference ? g_splitReference : g_splitRecent;
+    D3D11_TEXTURE2D_DESC refDesc;
+    ref.tex->GetDesc(&refDesc);
+    if (refDesc.Width == bbDesc.Width && refDesc.Height == bbDesc.Height) {
+      ctx->CopyResource(g_hudCopy, bb);  // the finished HUD, to read while drawing into the back buffer
+      D3D11_MAPPED_SUBRESOURCE mapped;
+      if (SUCCEEDED(ctx->Map(g_splitCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        float* c = static_cast<float*>(mapped.pData);
+        std::memset(c, 0, 64);
+        const float w = float(bbDesc.Width), h = float(bbDesc.Height);
+        auto put = [&](int at, const float* r) {
+          if (r)
+            for (int k = 0; k < 4; ++k) c[at + k] = std::round(r[k] * (k % 2 ? h : w));
+        };
+        put(0, base);
+        put(4, tip);
+        c[8] = 0.1f;
+        c[9] = 0.25f;
+        c[10] = 0.7f;   // motion fades to a third in 3 frames, a tooltip's arrival is gone in ~8
+        c[11] = 0.04f;
+        put(12, hide);
+        ctx->Unmap(g_splitCb, 0);
+      }
+      StateBackup backup;
+      backup.Save(ctx);
+      D3D11_VIEWPORT vp{0, 0, float(bbDesc.Width), float(bbDesc.Height), 0, 1};
+      ctx->RSSetViewports(1, &vp);
+      ctx->RSSetState(g_raster);
+      ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+      ctx->OMSetDepthStencilState(g_depthState, 0);
+      ctx->PSSetConstantBuffers(0, 1, &g_splitCb);
+      ctx->VSSetShader(g_vs, nullptr, 0);
+      ctx->GSSetShader(nullptr, nullptr, 0);
+      ctx->HSSetShader(nullptr, nullptr, 0);
+      ctx->DSSetShader(nullptr, nullptr, 0);
+      ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      ctx->IASetInputLayout(nullptr);
+      // Motion over the bottom bar (from the frame before; the first frame of a menu: none yet).
+      D3D11_TEXTURE2D_DESC motionDesc = bbDesc;
+      motionDesc.Format = DXGI_FORMAT_R16_FLOAT;
+      const bool motionOk = hide && EnsureSplitTex(g_splitPrev, bbDesc, false) &&
+                            EnsureSplitTex(g_splitMotion[0], motionDesc, true) && EnsureSplitTex(g_splitMotion[1], motionDesc, true);
+      ID3D11ShaderResourceView* motionSrv = nullptr;
+      if (motionOk) {
+        SplitTex& out = g_splitMotion[g_splitMotionAt];
+        SplitTex& last = g_splitMotion[1 - g_splitMotionAt];
+        if (!g_splitHavePrev) {
+          ctx->CopyResource(g_splitPrev.tex, g_hudCopy);
+          const float zero[4] = {};
+          ctx->ClearRenderTargetView(last.rtv, zero);
+        }
+        ID3D11ShaderResourceView* in[4] = {g_hudCopySrv, ref.srv, g_splitPrev.srv, last.srv};
+        ctx->PSSetShaderResources(0, 4, in);
+        g_origOMSetRenderTargets(ctx, 1, &out.rtv, nullptr);
+        ctx->PSSetShader(g_splitMotionPs, nullptr, 0);
+        ctx->Draw(3, 0);
+        ID3D11RenderTargetView* noRtv = nullptr;
+        g_origOMSetRenderTargets(ctx, 1, &noRtv, nullptr);
+        motionSrv = out.srv;
+      }
+      ID3D11ShaderResourceView* srvs[4] = {g_hudCopySrv, ref.srv, nullptr, motionSrv};
+      ctx->PSSetShaderResources(0, 4, srvs);
+      if (base) {
+        g_origOMSetRenderTargets(ctx, 1, &g_splitHand.rtv, nullptr);
+        ctx->PSSetShader(g_splitHandPs, nullptr, 0);
+        ctx->Draw(3, 0);
+      }
+      g_origOMSetRenderTargets(ctx, 1, &g_rtv, nullptr);
+      ctx->PSSetShader(g_splitFloatPs, nullptr, 0);
+      ctx->Draw(3, 0);
+      ID3D11ShaderResourceView* none[4] = {};
+      ctx->PSSetShaderResources(0, 4, none);
+      backup.Restore(ctx);
+      if (motionOk) {
+        ctx->CopyResource(g_splitPrev.tex, g_hudCopy);
+        g_splitMotionAt = 1 - g_splitMotionAt;
+        g_splitHavePrev = true;
+      }
+      if (base) result = g_splitHand.tex;
+    }
+  }
+  ctx->Release();
+  bb->Release();
+  return result;
 }
 
 namespace {
@@ -1583,6 +1964,7 @@ void Shutdown() {
   for (ID3D11DepthStencilView*& v : g_sceneDsvs) SafeRelease(v);
   g_titleMeter.Release();
   ReleaseCutout();
+  ReleaseSplit();
   g_sceneMeter.value = -1.0f;
   g_hudMeter.value = -1.0f;
   SafeRelease(g_hudCopySrv);

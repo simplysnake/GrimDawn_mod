@@ -30,11 +30,13 @@ with the devotion constellations as the sky.
   left-handed mirrors everything. Makes Quest Touch fully playable.
 - **Player menus on the hand** (done): inventory, skills, character and the other player windows open on the off
   hand like the skill bar (same HUD image, its own quad layer and rectangle; the laser clicks them there).
-  The Devotion screen stays on the floating panel (much bigger).
+  The Devotion screen stays on the floating panel (much bigger). The HUD is split by pixel against a snapshot
+  from before the menu opened, so item tooltips go to the hand whole; the bottom bar is hidden while a menu is
+  open (a tooltip over it is told apart from the globes' moving liquid frame to frame).
 - **Controller models** in the headset (done, tested on Index): SteamVR has no XR_MSFT_controller_model, so the
   mod reads SteamVR's own render models (OBJ + texture, picked by interaction profile) and draws them into
   each eye at the aim pose minus the model's "tip" offset. Static (buttons don't move yet).
-- **Controller warnings** (built, testing): a log line and a short notice in the headset when a controller stops being
+- **Controller warnings** (done, tested on Index): a log line and a short notice in the headset when a controller stops being
   tracked or goes to standby.
 
 ### 1. Pointer in VR: world cursor + controller laser – medium (1–2 weeks)
@@ -60,9 +62,10 @@ One pipeline: a point in the 3D world becomes the game's mouse position. Sources
 - Decide how the game's own camera zoom (mouse wheel) and rotation behave alongside world scale and the
   level-horizon view.
 
-### 4. Head-tracked 3D audio – small
-- The game puts the audio listener at its own camera (`WorldCamera::SetListenerPosition`); move it to the
-  head so sounds turn with you.
+### 4. Head-tracked 3D audio – small (built, testing)
+- The game points its listener in `WorldCamera::SetListenerPosition` (camera's horizontal facing, world up);
+  in stereo the mod turns those ears by the head's rotation relative to the game camera (F8 > Sound).
+  The listener position stays the game's.
 
 ### 5. Screen-space effects – test + fixes
 - Rain/snow overlays, hit flashes, blur ("screen effects" option) assume a flat screen; check each in
