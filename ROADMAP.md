@@ -13,9 +13,9 @@ with the devotion constellations as the sky.
 | Fade mask | World-space fade around the player from scene depth (F7, distance-ring debug view) |
 | HUD | Game HUD captured to a floating, tilted panel; placement sliders (distance, height, size, tilt); brightness/opacity and a dark backing that strengthens in daylight; minimap + quest block can be moved left (goes back in place while a menu is open, menus draw on top) |
 | Labels in 3D | Damage numbers (from the game's combat-text event) and item names (from the label layout) drawn by the mod into each eye at their world position, with real depth; item names keep rarity colours; health bars show |
-| Camera | Viewpoint pulled towards the character (whole zoom range moves closer; F8 > World) |
+| Camera | Viewpoint pulled towards the character (whole zoom range moves closer), own camera angle, view tilt, zoom speed, smooth follow with dead zone (F8 > Camera) |
 | Interiors | Caves and interiors tested: look fine with the level-horizon view |
-| Settings | F8 window: HUD placement/look, world, 3D labels, Save to control.ini; defaults = tested values, Stereo mode |
+| Settings | F8 window in tabs (Camera, HUD, Hands, World, Sound & mirror, Diagnostics), Seated / Standing / Calm presets, Save to control.ini; usable with the laser in VR, opened by a gear beside the hand bar or holding both stick clicks |
 | Input | Index / Steam Controller / gamepad through a virtual XInput pad; OpenXR actions rebindable in SteamVR; recentre by clicking both sticks or SteamVR Reset View |
 | Launching | One-click Steam shortcut (SteamVR → game → mod), save backup, hot reload |
 | Focus | Game keeps running when its window loses focus (`WinWindow::IsActive` reports active in VR); keyboard/mouse stay focus-gated |
@@ -56,9 +56,10 @@ One pipeline: a point in the 3D world becomes the game's mouse position. Sources
   back to the gaze point.
 
 ### 3. Comfort – medium
-- Stabilised world: smooth camera follow instead of locked to the character (motion-sickness risk).
+- Stabilised world (done): smooth camera follow with a dead zone instead of locked to the character.
 - Live world-scale control (stick / mouse wheel) from tabletop to close-up.
-- Seated and standing presets.
+- Seated, standing and calm presets (done).
+- Camera angle and view tilt decoupled from the game's camera, slower zoom (done).
 - Decide how the game's own camera zoom (mouse wheel) and rotation behave alongside world scale and the
   level-horizon view.
 

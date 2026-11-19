@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 
 #include "engine_hooks.h"
 #include "log.h"
@@ -18,6 +19,7 @@
 #include "mask.h"
 #include "sky.h"
 #include "perf.h"
+#include "pointer.h"
 #include "xr.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
@@ -55,6 +57,9 @@ std::atomic<bool> g_tornDown{false};
 HANDLE g_teardownDone = nullptr;
 bool g_imguiReady = false;
 bool g_menuVisible = true;
+std::atomic<bool> g_toggleRequested{false};  // from the controllers (both sticks held)
+bool g_iconShown = false;   // the settings gear (opens / closes the window) is drawn this frame (in VR)
+bool g_uiBroken = false;    // ImGui's device objects are missing: no UI at all
 HWND g_window = nullptr;
 WNDPROC g_origWndProc = nullptr;
 ID3D11Device* g_device = nullptr;
@@ -71,7 +76,7 @@ struct InFlightGuard {
 };
 
 LRESULT CALLBACK HookWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-  if (g_imguiReady && g_menuVisible && !g_tornDown) {
+  if (g_imguiReady && (g_menuVisible || g_iconShown) && !g_tornDown) {
     ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp);
     const ImGuiIO& io = ImGui::GetIO();
     const bool mouseMsg = msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST;
@@ -155,6 +160,64 @@ void UnpatchVtable() {
   g_vtable = nullptr;
 }
 
+// The settings gear (opens and closes the window): only in VR with the laser, and not over a game menu.
+bool ShowSettingsIcon() {
+  const xr::Settings& s = xr::GetSettings();
+  return xr::StereoFrameActive() && s.pointer && !s.pureController && !xr::HudMenuOpen();
+}
+
+// A gear just right of the bottom bar on the off hand (or on the floating panel's left edge when the bar isn't
+// on the hand); true when clicked (laser trigger or mouse).
+bool DrawSettingsIcon() {
+  const ImGuiIO& io = ImGui::GetIO();
+  const ImVec2 screen = io.DisplaySize;
+  float bar[4];
+  const bool onHand = xr::HandBarShown(bar) && bar[3] > bar[1];
+  float button, size;  // the clickable square (a margin around the gear) and the gear's backing, in pixels
+  ImVec2 at;
+  if (onHand) {
+    button = (bar[3] - bar[1]) * screen.y * 0.425f;
+    size = button * 0.8f;
+    at = ImVec2(bar[2] * screen.x + 0.015f * screen.x, ((bar[1] + bar[3]) * 0.5f) * screen.y - button * 0.5f);
+  } else {
+    button = screen.y * 0.04f;
+    size = button * 0.8f;
+    at = ImVec2(screen.x * 0.012f, screen.y * 0.40f);
+  }
+  ImGui::SetNextWindowPos(at, ImGuiCond_Always);
+  ImGui::SetNextWindowBgAlpha(0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                                      ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_AlwaysAutoResize;
+  ImGui::Begin("###gdvr_icon", nullptr, kFlags);
+  const ImVec2 b = ImGui::GetCursorScreenPos();
+  const bool clicked = ImGui::InvisibleButton("open", ImVec2(button, button));
+  const bool hovered = ImGui::IsItemHovered();
+  if (screen.x > 0 && screen.y > 0)
+    xr::SetSettingsIconRect(b.x / screen.x, b.y / screen.y, (b.x + button) / screen.x, (b.y + button) / screen.y, onHand);
+  const ImVec2 p(b.x + (button - size) * 0.5f, b.y + (button - size) * 0.5f);
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec2 c(p.x + size * 0.5f, p.y + size * 0.5f);
+  const ImU32 back = hovered ? IM_COL32(70, 60, 40, 230) : IM_COL32(20, 18, 14, 190);
+  const ImU32 fore = hovered ? IM_COL32(255, 220, 140, 255) : IM_COL32(215, 190, 140, 235);
+  dl->AddRectFilled(p, ImVec2(p.x + size, p.y + size), back, size * 0.22f);
+  dl->AddRect(p, ImVec2(p.x + size, p.y + size), fore, size * 0.22f, 0, size * 0.03f);
+  // Gear: eight teeth around a ring.
+  const float rOuter = size * 0.34f, rRing = size * 0.24f, rHole = size * 0.10f;
+  for (int k = 0; k < 8; ++k) {
+    const float a = k * 3.14159265f / 4.0f, ca = std::cos(a), sa = std::sin(a);
+    dl->AddLine(ImVec2(c.x + ca * rRing, c.y + sa * rRing), ImVec2(c.x + ca * rOuter, c.y + sa * rOuter), fore,
+                size * 0.11f);
+  }
+  dl->AddCircleFilled(c, rRing, fore, 24);
+  dl->AddCircleFilled(c, rHole, back, 16);
+  ImGui::End();
+  ImGui::PopStyleVar(2);
+  return clicked;
+}
+
 // One frame of the mod's work, then `next` presents it.
 HRESULT Frame(PresentFn next, IDXGISwapChain* swapChain, UINT syncInterval, UINT flags) {
   if (g_tornDown) return next(swapChain, syncInterval, flags);
@@ -176,28 +239,52 @@ HRESULT Frame(PresentFn next, IDXGISwapChain* swapChain, UINT syncInterval, UINT
 
   static bool keyWasDown = false;
   const bool keyDown = (GetAsyncKeyState(kToggleKey) & 0x8000) != 0;
-  if (keyDown && !keyWasDown) g_menuVisible = !g_menuVisible;
+  if ((keyDown && !keyWasDown) || g_toggleRequested.exchange(false)) g_menuVisible = !g_menuVisible;
   keyWasDown = keyDown;
 
   engine::OnFramePresented();
 
-  if (g_imguiReady && g_menuVisible) {
+  // With the window hidden in VR, a small icon on the HUD panel opens it again with the laser.
+  g_iconShown = ShowSettingsIcon();
+  const bool drawUi = g_menuVisible || g_iconShown;
+  if (g_imguiReady && drawUi && !g_uiBroken) {
     if (!g_rtv) CreateRtv(swapChain);
     ImGui_ImplDX11_NewFrame();
     // If the backend failed to create its device objects the font atlas is empty and NewFrame
     // would dereference a null font (seen once after a hot reload): skip the UI instead.
     if (ImGui::GetIO().Fonts->Fonts.Size == 0) {
-      static bool warned = false;
-      if (!warned) Log("ImGui device objects missing (font atlas empty); debug window disabled");
-      warned = true;
-      g_menuVisible = false;
+      Log("ImGui device objects missing (font atlas empty); debug window disabled");
+      g_uiBroken = true;
+      g_menuVisible = g_iconShown = false;
     }
   }
-  if (g_imguiReady && g_menuVisible) {
+  if (g_imguiReady && drawUi && !g_uiBroken) {
     ImGui_ImplWin32_NewFrame();
-    ImGui::GetIO().MouseDrawCursor = true;
+    ImGui::GetIO().MouseDrawCursor = g_menuVisible;
+    {
+      // The controller laser on the window works it like a mouse (after the Win32 backend, so it wins).
+      ImGuiIO& io = ImGui::GetIO();
+      static bool laserWas = false, downWas = false;
+      float u, v, wheel;
+      bool down;
+      if (pointer::LaserOnDebugWindow(u, v, down, wheel)) {
+        io.AddMousePosEvent(u * io.DisplaySize.x, v * io.DisplaySize.y);
+        if (down != downWas) io.AddMouseButtonEvent(ImGuiMouseButton_Left, down);
+        if (wheel != 0) io.AddMouseWheelEvent(0, wheel);
+        laserWas = true;
+        downWas = down;
+      } else if (laserWas) {
+        if (downWas) io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+        laserWas = downWas = false;
+      }
+    }
     ImGui::NewFrame();
-    engine::DrawDebugUI();
+    if (g_menuVisible) {
+      bool open = true;
+      engine::DrawDebugUI(&open);  // its X closes it
+      if (!open) g_menuVisible = false;
+    }
+    if (g_iconShown && DrawSettingsIcon()) g_menuVisible = !g_menuVisible;
     ImGui::Render();
     g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -296,6 +383,8 @@ void DrawWorld(const WorldText* texts, int textCount, const Polyline* lines, int
 }
 
 HWND GameWindow() { return g_window; }
+
+void ToggleMenu() { g_toggleRequested = true; }
 
 unsigned long long LastPresentTick() { return g_lastPresent.load(); }
 

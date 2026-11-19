@@ -49,6 +49,10 @@ std::atomic<double> g_parkUntil{0};
 float g_smoothX = 0, g_smoothY = 0;
 bool g_clickWasDown = false;
 double g_lockUntil = 0;
+// The laser on the F8 window (read by the overlay before it draws the window).
+std::atomic<bool> g_uiOn{false}, g_uiDown{false};
+std::atomic<float> g_uiU{0}, g_uiV{0}, g_uiWheel{0};
+double g_uiAt = 0;
 float g_lockX = 0, g_lockY = 0;
 
 constexpr float kMaxLength = 60.0f;   // game units, when the ray hits nothing
@@ -447,8 +451,8 @@ constexpr double kGripTapMs = 400;  // a grip squeezed and let go within this, n
 struct Layout {
   double tapUntil[256] = {};
   // stick clicks (W / Y, both together = recentre)
-  bool lThumb = false, rThumb = false, chord = false, lThumbGrip = false, rThumbGrip = false;
-  double lThumbAt = 0, rThumbAt = 0;
+  bool lThumb = false, rThumb = false, chord = false, lThumbGrip = false, rThumbGrip = false, chordLong = false;
+  double lThumbAt = 0, rThumbAt = 0, chordAt = 0;
   // face buttons: the hotbar key each one pressed (chosen when it went down, grip or not), 0 = up
   int faceKey[4] = {};
   // grips: potion on a quick squeeze, unless used as the shift for other buttons meanwhile
@@ -519,8 +523,15 @@ void MapControls(const XINPUT_GAMEPAD& c, double now, Output& out) {
   const bool lt = held(XINPUT_GAMEPAD_LEFT_THUMB), rt = held(XINPUT_GAMEPAD_RIGHT_THUMB);
   if (lt && rt && !l.chord) {
     l.chord = true;
+    l.chordAt = now;
+    l.chordLong = false;
     xr::RequestRecenter();
     Log("pointer: recentre (both sticks)");
+  }
+  if (lt && rt && l.chord && !l.chordLong && now - l.chordAt >= 1000) {  // held: the F8 window
+    l.chordLong = true;
+    overlay::ToggleMenu();
+    Log("pointer: settings window toggled (both sticks held)");
   }
   if (lt && !l.lThumb) {
     l.lThumbAt = now;
@@ -640,7 +651,8 @@ void PadCamera(bool inWorld, const XINPUT_GAMEPAD* controls, double now) {
   const float dt = float(std::clamp((now - g_cameraAt) / 1000.0, 0.0, 0.1));
   g_cameraAt = now;
   const input::TouchPads p = input::Pads();
-  float zoom = -g_zoomPad.Step(p.rightTouch, p.rightPress, p.right.y) * kZoomPerPad;  // slide up = closer
+  const float zoomSpeed = xr::GetSettings().zoomSpeed;
+  float zoom = -g_zoomPad.Step(p.rightTouch, p.rightPress, p.right.y) * kZoomPerPad * zoomSpeed;  // slide up = closer
   const float turn = g_turnPad.Step(p.leftTouch, p.leftPress, p.left.y);
   if (!inWorld || xr::HudMenuOpen()) {
     g_yawPending = 0;
@@ -651,7 +663,9 @@ void PadCamera(bool inWorld, const XINPUT_GAMEPAD* controls, double now) {
   g_yawPending -= yaw;
   float stickTurn = 0;
   if (controls) {
-    zoom -= StickAxis(controls->sThumbRY) * kStickZoomPerSec * dt;  // push up = closer
+    // Push up = closer; squared like the turn, so a light push zooms gently.
+    const float y = StickAxis(controls->sThumbRY);
+    zoom -= y * std::fabs(y) * kStickZoomPerSec * zoomSpeed * dt;
     // Squared, so a light push turns slowly and a full push at the set speed.
     const float x = StickAxis(controls->sThumbRX);
     stickTurn = x * std::fabs(x) * xr::GetSettings().stickTurnDegPerSec / 57.2958f * dt;
@@ -799,6 +813,18 @@ bool CursorFeed(float& x, float& y) {
   return g_feeding.load();
 }
 
+bool LaserOnDebugWindow(float& u, float& v, bool& down, float& wheel) {
+  if (!g_uiOn.load()) {
+    g_uiWheel = 0;
+    return false;
+  }
+  u = g_uiU.load();
+  v = g_uiV.load();
+  down = g_uiDown.load();
+  wheel = g_uiWheel.exchange(0);
+  return true;
+}
+
 void ParkCursor(double ms) { g_parkUntil = NowMs() + ms; }
 
 void TapKey(int dik) { g_forceUntil[dik & 0xFF] = HookNowMs() + 120.0; }
@@ -883,7 +909,19 @@ void Update(Vec3 origin, Vec3 right, Vec3 up, Vec3 fwd, float scale, Vec3 target
   const bool active = input::PointerControls(c);
   if (active && s.pointerHand == 0) c = Mirrored(c);
 
-  PadCamera(haveTarget, active ? &c : nullptr, now);
+  // On the F8 window: the laser is the window's mouse (trigger = click, stick = scroll), not the game's.
+  const bool onUi = st.onPanel && game.width > 0 && game.height > 0 &&
+                    xr::DebugWindowAt(st.clientX / game.width, st.clientY / game.height);
+  {
+    const float dt = g_uiAt > 0 ? float(std::clamp((now - g_uiAt) / 1000.0, 0.0, 0.1)) : 0.0f;
+    g_uiAt = now;
+    if (onUi && active) {
+      const float y = StickAxis(c.sThumbRY);
+      g_uiWheel = g_uiWheel.load() + y * std::fabs(y) * 12.0f * dt;  // lines per second at full push
+    }
+  }
+
+  PadCamera(haveTarget && !onUi, active ? &c : nullptr, now);
 
   Output out;
   float feedX = st.clientX, feedY = st.clientY;
@@ -931,7 +969,21 @@ void Update(Vec3 origin, Vec3 right, Vec3 up, Vec3 fwd, float scale, Vec3 target
       g_trueTarget[0] = st.end.x, g_trueTarget[1] = st.end.y, g_trueTarget[2] = st.end.z;
       g_trueTargetUntil = HookNowMs() + 150;
     }
+    g_uiDown = onUi && clickLaser;
+    if (onUi) {  // the game gets neither the clicks nor the cursor
+      out.buttons[0] = out.buttons[1] = false;
+      feed = false;
+      st.moving = false;
+    }
+  } else {
+    g_uiDown = false;
   }
+  if (onUi) {
+    const bool locked = active && now < g_lockUntil;  // held still while a click starts
+    g_uiU = (locked ? g_lockX : st.clientX) / game.width;
+    g_uiV = (locked ? g_lockY : st.clientY) / game.height;
+  }
+  g_uiOn = onUi;
   if (now < g_parkUntil.load()) {  // parked: off-screen, no clicks (screen captures without hover text)
     feed = true;
     feedX = feedY = -4000.0f;

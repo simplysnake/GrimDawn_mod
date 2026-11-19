@@ -9,7 +9,7 @@ bool Install();
 void OnFramePresented();
 
 // Draws the ImGui debug window (camera data, render calls, experiments).
-void DrawDebugUI();
+void DrawDebugUI(bool* open);  // the settings window; its X sets *open to false
 
 // Number of threads currently inside one of our engine detours.
 int InFlight();

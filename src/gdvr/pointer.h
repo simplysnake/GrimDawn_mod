@@ -32,6 +32,10 @@ void DrawEye(const numbers::EyeView& view);
 // Moves the game's cursor off-screen for a while (screen captures without hover text).
 void ParkCursor(double ms);
 
+// The laser is on the F8 window: where (fractions of the game image), the trigger, and stick scrolling
+// since the last call (lines, + = up).
+bool LaserOnDebugWindow(float& u, float& v, bool& down, float& wheel);
+
 // Presses and releases a key in the game (DirectInput code, e.g. DIK_D), render thread.
 void TapKey(int dik);
 

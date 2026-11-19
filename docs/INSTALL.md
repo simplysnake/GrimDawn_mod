@@ -43,7 +43,7 @@ Normal Grim Dawn from Steam keeps working as before, with your own settings.
 
 ## Controls
 
-The laser is on your right hand. Left-handed: in the F8 window under **Pointer**, pick **Left hand**, and
+The laser is on your right hand. Left-handed: in the F8 window on the **Hands** tab, pick **Left hand**, and
 every control below swaps hands (the menu buttons and touch pads stay where they are).
 
 | Control | Does |
@@ -52,11 +52,11 @@ every control below swaps hands (the menu buttons and touch pads stay where they
 | Right trigger | Left click (walk, attack, pick up, press buttons) |
 | Left trigger | Right click (skill) |
 | Left stick | Walk |
-| Right stick | Turn the camera (left / right; speed in F8 > Pointer), zoom (up: closer, down: further) |
+| Right stick | Turn the camera (left / right; speed in F8 > Camera), zoom (up: closer, down: further) |
 | A / B (right), A / B or X / Y (left) | Hotbar 1-2, 3-4 |
 | Hold either grip + those buttons | Hotbar 5-6, 7-8 |
 | Quick squeeze of a grip | Health potion (left), energy potion (right) |
-| Left stick click / right stick click | Swap weapons / swap skill bar; both together: recentre the view |
+| Left stick click / right stick click | Swap weapons / swap skill bar; both together: recentre the view (hold both for a second: settings window) |
 | Hold a grip + left / right stick click | Inventory / map |
 | Left menu button (Quest) | Game menu (hold: character) |
 | Index: left touch pad press | Inventory (hold: map) |
@@ -67,9 +67,10 @@ Assign skills to the hotbar the usual way: point at a hotbar slot and pull the r
 
 The bottom bar (health, energy, skills) sits on your left hand. Player windows (inventory, character,
 skills...) open there too and are clicked with the laser; wide ones (Devotion, the map) and the game menu
-stay on the floating panel. Size, height and tilt are in the F8 window under **Hand HUD**.
+stay on the floating panel. Size, height and tilt are in the F8 window on the **Hands** tab. The small gear to the right of the bar
+opens and closes the settings window.
 
-Your controllers are shown in the headset (SteamVR's own models; F8 > **Controllers** turns them off). If one
+Your controllers are shown in the headset (SteamVR's own models; F8 > **Hands** turns them off). If one
 stops being tracked or goes to standby, a short notice says so on the floating panel.
 
 Keyboard: **F8** settings window, **F9** VR mode (off, flat screen, stereo), **F10** recentre,
@@ -79,7 +80,7 @@ Keyboard: **F8** settings window, **F9** VR mode (off, flat screen, stereo), **F
 
 The game window on your monitor shows what you see in the headset: the left eye, cropped to a normal
 field of view, with the HUD panels floating where they are in the headset (including the one on your hand). Record or stream that window with any tool (OBS "Game Capture" or
-"Window Capture", Steam recording, ShadowPlay...). In the **F8** window, **Desktop mirror** turns it off
+"Window Capture", Steam recording, ShadowPlay...). In the **F8** window, **Sound & mirror** > **Desktop mirror** turns it off
 and sets its field of view. If a recording ever shows something other than the window (a stretched or
 HUD-only picture), switch OBS to **Window Capture** (capture method "Windows 10"), which records exactly
 what the window shows.
@@ -102,8 +103,12 @@ installed version.
 
 ## Settings
 
-Everything is in the **F8** window (HUD distance and size, labels, sky, controls...). **Save settings**
-writes them to `%LOCALAPPDATA%\gdvr\control.ini`; delete that file to go back to the defaults.
+Everything is in the **F8** window, in tabs: **Camera** (closer, angle, tilt, zoom and turn speed, smooth
+follow), **HUD**, **Hands**, **World**, **Sound & mirror**. In VR, open it with the gear beside the bar on your
+hand (or hold both stick clicks for a second) and work it with the laser: trigger clicks and drags sliders, the
+right stick scrolls. The X closes it. **Seated**, **Standing** and **Calm** at the top set the HUD placement,
+world scale and camera follow in one go. **Save settings** writes them to `%LOCALAPPDATA%\gdvr\control.ini`;
+delete that file to go back to the defaults.
 
 The sky behind the world is `skybox\skybox.png` (an equirectangular 2:1 image, 4096x2048 works well). To use
 your own, put `backdrop.png` or `backdrop.jpg` in `%LOCALAPPDATA%\gdvr\sky`. The Devotion constellations

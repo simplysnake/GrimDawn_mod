@@ -96,6 +96,9 @@ std::atomic<bool> g_inWorld{true};  // false on the title screen (no character t
 float g_debugRect[4] = {};          // the F8 window in the HUD image (fractions), while it is shown
 float g_menuContent = -1;           // HUD coverage outside the playing HUD's parts (menu detection)
 double g_debugRectAt = -1e9;        // when it was last drawn
+float g_iconRect[4] = {};           // the settings gear in the HUD image (fractions), while it is shown
+double g_iconAt = -1e9;             // when it was last drawn
+bool g_iconOnHand = false;          // ...beside the bar on the hand
 float g_titleRect[4] = {};          // title screen: the character picture in the menu layer (under g_mutex)
 bool g_titleRectValid = false;
 std::atomic<int> g_dumpEyes{0};  // F11: bit per eye still to dump
@@ -599,18 +602,21 @@ mask::HudLook CurrentHudLook() {
   // Menus (inventory, character, devotion, skills, map...): what the HUD shows apart from the parts the
   // playing HUD always has (the bottom bar, the minimap and quest block, the F8 window, the cursor arrows).
   // The playing HUD leaves that almost empty; a menu fills a good part of it.
-  float skipRects[3][4] = {{0.0f, std::min(0.86f, g_settings.handHudRect[1]), 1.0f, 1.0f},
+  float skipRects[4][4] = {{0.0f, std::min(0.86f, g_settings.handHudRect[1]), 1.0f, 1.0f},
                            {1.0f - g_settings.hudSideWidth - 0.02f, 0.0f, 1.0f, g_settings.hudSideHeight + 0.02f},
+                           {0, 0, 0, 0},
                            {0, 0, 0, 0}};
   if (NowMs() - g_debugRectAt < 500)
     for (int k = 0; k < 4; ++k) skipRects[2][k] = g_debugRect[k];
+  if (NowMs() - g_iconAt < 500)
+    for (int k = 0; k < 4; ++k) skipRects[3][k] = g_iconRect[k];
   float skipPts[2][2] = {{0.5f, 0.5f}, {-10, -10}};
   float cx, cy;
   if (pointer::CursorFeed(cx, cy) && g_hudChain.width > 0) {
     skipPts[1][0] = cx / float(g_hudChain.width);
     skipPts[1][1] = cy / float(g_hudChain.height);
   }
-  g_menuContent = mask::HudContentCoverage(skipRects, 3, skipPts, 2, 0.05f);
+  g_menuContent = mask::HudContentCoverage(skipRects, 4, skipPts, 2, 0.05f);
   static bool covered = false;
   if (g_menuContent >= 0) {
     if (!covered && g_menuContent > g_settings.hudMenuCoverage) covered = true;
@@ -619,7 +625,7 @@ mask::HudLook CurrentHudLook() {
   g_hudMenuOpen = covered || paused;
   // The window itself: leave out the bottom bar, the minimap block (the minimap scrolls as you walk, which
   // looks like new content) and the F8 window. The player windows don't reach the block.
-  UpdateHandMenu(covered, paused, skipRects, 3);
+  UpdateHandMenu(covered, paused, skipRects, 4);
   look.sideShift = g_hudMenuOpen ? 0.0f : g_settings.hudSideShift;
   look.sideWidth = g_settings.hudSideWidth;
   look.sideHeight = g_settings.hudSideHeight;
@@ -647,6 +653,11 @@ bool SaveSettingsLocked() {
   put(L"shared_frustum", s.sharedFrustum);
   put(L"far_plane", s.farPlane);
   put(L"camera_pull", s.cameraPull);
+  put(L"camera_smooth", s.cameraSmooth);
+  put(L"camera_deadzone", s.cameraDeadzone);
+  put(L"camera_angle", s.cameraAngleDeg);
+  put(L"view_tilt", s.viewTiltDeg);
+  put(L"zoom_speed", s.zoomSpeed);
   put(L"contact_shadows_on", s.contactShadowsOn);
   put(L"contact_shadows", s.contactShadows);
   put(L"contact_softness", s.contactSoftness);
@@ -855,12 +866,13 @@ void UpdateHandRect() {
   const double now = NowMs();
   if (mask::HudContentBounds(region, skip, 2, 0.04f, found)) {
     rect[0] = std::min(rect[0], found[0] - 0.005f);
-    for (int k = 0; k < 4; ++k) g_handRect[k] = rect[k];
     g_handGrownUntil = now + 300;  // stays grown a moment (no flicker while it opens and closes)
-    return;
+    for (int k = 0; k < 4; ++k) g_handRect[k] = rect[k];
   }
-  if (now < g_handGrownUntil) return;
-  for (int k = 0; k < 4; ++k) g_handRect[k] = rect[k];
+  if (now >= g_handGrownUntil)
+    for (int k = 0; k < 4; ++k) g_handRect[k] = rect[k];
+  // The settings gear drawn beside the bar is part of the hand panel.
+  if (g_iconOnHand && now - g_iconAt < 200) g_handRect[2] = std::max(g_handRect[2], g_iconRect[2]);
 }
 
 // The hand panel, relative to g_ref: above the off-hand controller, tilted towards the face. The bar keeps its
@@ -1309,6 +1321,14 @@ bool HudPanelRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distanc
   return u >= 0 && u <= 1 && v >= 0 && v <= crop;
 }
 
+bool DebugWindowAtLocked(float u, float v) {
+  const double now = NowMs();
+  auto inside = [&](const float* r, double at) {
+    return now - at < 500 && u >= r[0] && u <= r[2] && v >= r[1] && v <= r[3];
+  };
+  return inside(g_debugRect, g_debugRectAt) || inside(g_iconRect, g_iconAt);
+}
+
 bool HandHudRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distance) {
   std::lock_guard lock(g_mutex);
   const bool window = HandMenuActive();
@@ -1330,15 +1350,22 @@ bool HandHudRay(Vec3 originRel, Vec3 dirRel, float& u, float& v, float& distance
   // catches the laser.
   const float fu = r[0] + lu * (r[2] - r[0]), fv = r[1] + lv * (r[3] - r[1]);
   const bool inBase = fu >= base[0] && fu <= base[2] && fv >= base[1] && fv <= base[3];
-  if (!inBase && (!OnHandPiece(fu, fv) || mask::HudAlphaAt(fu, fv) < 0.08f)) return false;
+  if (!inBase && !DebugWindowAtLocked(fu, fv) && (!OnHandPiece(fu, fv) || mask::HudAlphaAt(fu, fv) < 0.08f))
+    return false;
   u = r[0] + lu * (r[2] - r[0]);  // in the whole HUD image
   v = r[1] + lv * (r[3] - r[1]);
   distance = t;
   return true;
 }
 
+bool DebugWindowAt(float u, float v) {
+  std::lock_guard lock(g_mutex);
+  return DebugWindowAtLocked(u, v);
+}
+
 bool HudSolidAt(float u, float v, bool sticky) {
   std::lock_guard lock(g_mutex);
+  if (DebugWindowAtLocked(u, v)) return true;  // the F8 window: the laser works it like a mouse
   // A menu is open: the whole panel catches the pointer (no falling through gaps in a menu), unless the
   // window is on the hand (the floating panel is then the playing HUD around it).
   if (g_hudMenuOpen && !HandMenuActive()) return true;
@@ -1494,6 +1521,23 @@ long DeviceRemovedReason() {
   return device ? long(device->GetDeviceRemovedReason()) : 0;
 }
 
+bool HandBarShown(float rect[4]) {
+  std::lock_guard lock(g_mutex);
+  if (!HandHudActive()) return false;
+  for (int k = 0; k < 4; ++k) rect[k] = g_settings.handHudRect[k];
+  return true;
+}
+
+void SetSettingsIconRect(float x0, float y0, float x1, float y1, bool onHand) {
+  std::lock_guard lock(g_mutex);
+  g_iconOnHand = onHand;
+  g_iconRect[0] = x0;
+  g_iconRect[1] = y0;
+  g_iconRect[2] = x1;
+  g_iconRect[3] = y1;
+  g_iconAt = NowMs();
+}
+
 void SetDebugWindowRect(float x0, float y0, float x1, float y1) {
   std::lock_guard lock(g_mutex);
   g_debugRect[0] = x0 - 0.01f;
@@ -1531,15 +1575,121 @@ void Shutdown() {
   g_gameSwapChain = nullptr;
 }
 
-void DrawDebugUI() {
-  std::lock_guard lock(g_mutex);
+// Play presets: the settings that depend on how you play, in one click. The recentred origin is always
+// the head, so they change where things sit relative to it, not a floor height.
+struct Preset {
+  const char* name;
+  const char* hint;
+  float worldScale, hudDistance, hudDown, hudTiltDeg, handHudTiltDeg, handMenuTiltDeg, cameraSmooth, cameraDeadzone;
+};
+const Settings kDefaults;
+const Preset kPresets[] = {
+    {"Seated", "Sitting at a desk: the tested defaults.", kDefaults.worldScale, kDefaults.hudDistance,
+     kDefaults.hudDown, kDefaults.hudTiltDeg, kDefaults.handHudTiltDeg, kDefaults.handMenuTiltDeg,
+     kDefaults.cameraSmooth, kDefaults.cameraDeadzone},
+    {"Standing",
+     "Standing: a bigger table below you, the HUD lower and tilted up, hand panels facing up more (arms hang "
+     "lower), a calmer camera.",
+     18.0f, 0.80f, 0.32f, 42.0f, 55.0f, 40.0f, 0.45f, 0.5f},
+    {"Calm", "Seated, for motion-sensitive players: the view glides slowly and ignores small steps.",
+     kDefaults.worldScale, kDefaults.hudDistance, kDefaults.hudDown, kDefaults.hudTiltDeg, kDefaults.handHudTiltDeg,
+     kDefaults.handMenuTiltDeg, 0.8f, 1.5f},
+};
+constexpr int kPresetCount = int(sizeof(kPresets) / sizeof(kPresets[0]));
+
+void ApplyPreset(int i) {
+  const Preset& p = kPresets[i];
+  g_settings.worldScale = p.worldScale;
+  g_settings.hudDistance = p.hudDistance;
+  g_settings.hudDown = p.hudDown;
+  g_settings.hudTiltDeg = p.hudTiltDeg;
+  g_settings.handHudTiltDeg = p.handHudTiltDeg;
+  g_settings.handMenuTiltDeg = p.handMenuTiltDeg;
+  g_settings.cameraSmooth = p.cameraSmooth;
+  g_settings.cameraDeadzone = p.cameraDeadzone;
+  g_recenterRequested = true;
+  Log("preset: %s", p.name);
+}
+
+bool PresetMatches(int i) {
+  const Preset& p = kPresets[i];
+  auto eq = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+  return eq(g_settings.worldScale, p.worldScale) && eq(g_settings.hudDistance, p.hudDistance) &&
+         eq(g_settings.hudDown, p.hudDown) && eq(g_settings.hudTiltDeg, p.hudTiltDeg) &&
+         eq(g_settings.handHudTiltDeg, p.handHudTiltDeg) && eq(g_settings.handMenuTiltDeg, p.handMenuTiltDeg) &&
+         eq(g_settings.cameraSmooth, p.cameraSmooth) && eq(g_settings.cameraDeadzone, p.cameraDeadzone);
+}
+
+void DrawDebugUI(void (*diagnostics)()) {
+  std::unique_lock lock(g_mutex);
   static const char* kModes[] = {"Off", "Screen", "Stereo"};
   ImGui::Text("%s  |  %s  |  %.0f fps (%.1f ms)", kModes[int(g_settings.mode)], g_status.c_str(), perf::LastFps(),
               perf::LastFrameMs());
-  ImGui::TextDisabled("F9 mode  F10 recentre (or both sticks)  F7 fade mask  F11 eye images");
+  ImGui::TextDisabled("F8 / hold both sticks: this window  F9 mode  F10 / click both sticks: recentre");
+  ImGui::TextDisabled("In VR: point the laser here, trigger = click, pointer stick = scroll");
+
+  {
+    ImGui::TextUnformatted("Play:");
+    for (int i = 0; i < kPresetCount; ++i) {
+      ImGui::SameLine();
+      const bool active = PresetMatches(i);
+      if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.25f, 1.0f));
+      if (ImGui::Button(kPresets[i].name)) ApplyPreset(i);
+      if (active) ImGui::PopStyleColor();
+      if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kPresets[i].hint);
+    }
+  }
+  {
+    static double savedAt = -10;
+    if (ImGui::Button("Save settings")) {
+      if (SaveSettingsLocked()) savedAt = ImGui::GetTime();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Recentre view")) g_recenterRequested = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Reset all to defaults")) {
+      const Mode mode = g_settings.mode;
+      g_settings = Settings{};
+      g_settings.mode = mode;
+    }
+    if (ImGui::GetTime() - savedAt < 3) {
+      ImGui::SameLine();
+      ImGui::TextUnformatted("Saved to control.ini");
+    }
+  }
   ImGui::Separator();
 
-  if (ImGui::CollapsingHeader("HUD placement", ImGuiTreeNodeFlags_DefaultOpen)) {
+  if (!ImGui::BeginTabBar("tabs")) return;
+
+  if (ImGui::BeginTabItem("Camera")) {
+    ImGui::SliderFloat("Camera closer (units)", &g_settings.cameraPull, 0.0f, 20.0f, "%.1f");
+    ImGui::SliderFloat("Camera angle (deg, 0 = the game's)", &g_settings.cameraAngleDeg, 0.0f, 85.0f, "%.0f");
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("How high above your character the view sits. Low = over the shoulder, zoom moves you\n"
+                        "forwards and back; high = looking down, zoom moves you up and down.");
+    ImGui::SliderFloat("View tilt (deg)", &g_settings.viewTiltDeg, -20.0f, 60.0f, "%.0f");
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Tilts the world towards you, so looking straight ahead shows the ground nearer your\n"
+                        "character (less looking down). 0 = straight ahead is the game's horizon.");
+    ImGui::SliderFloat("Zoom speed", &g_settings.zoomSpeed, 0.1f, 2.0f, "%.2f");
+    ImGui::SliderFloat("Stick turn speed (deg/s)", &g_settings.stickTurnDegPerSec, 30.0f, 240.0f, "%.0f");
+    ImGui::SliderFloat("Smooth follow (seconds, 0 = locked)", &g_settings.cameraSmooth, 0.0f, 1.5f, "%.2f");
+    ImGui::SliderFloat("Follow dead zone (units)", &g_settings.cameraDeadzone, 0.0f, 5.0f, "%.1f");
+    if (ImGui::Button("Reset camera")) {
+      const Settings d;
+      g_settings.cameraPull = d.cameraPull;
+      g_settings.cameraAngleDeg = d.cameraAngleDeg;
+      g_settings.viewTiltDeg = d.viewTiltDeg;
+      g_settings.zoomSpeed = d.zoomSpeed;
+      g_settings.stickTurnDegPerSec = d.stickTurnDegPerSec;
+      g_settings.cameraSmooth = d.cameraSmooth;
+      g_settings.cameraDeadzone = d.cameraDeadzone;
+    }
+    ImGui::EndTabItem();
+  }
+
+  if (ImGui::BeginTabItem("HUD")) {
+    ImGui::SeparatorText("Floating panel");
     ImGui::SliderFloat("Distance (m)", &g_settings.hudDistance, 0.25f, 2.5f, "%.2f");
     float height = -g_settings.hudDown;  // shown as up = positive
     if (ImGui::SliderFloat("Height (m, + up)", &height, -0.8f, 0.5f, "%.2f")) g_settings.hudDown = -height;
@@ -1549,16 +1699,6 @@ void DrawDebugUI() {
     ImGui::SliderFloat("Move left", &g_settings.hudSideShift, 0.0f, 0.78f, "%.2f");
     ImGui::SliderFloat("Block width", &g_settings.hudSideWidth, 0.05f, 0.5f, "%.2f");
     ImGui::SliderFloat("Block height", &g_settings.hudSideHeight, 0.05f, 1.0f, "%.2f");
-    ImGui::Checkbox("Show block outline", &g_settings.hudSideOutline);
-    ImGui::Checkbox("3D damage numbers", &g_settings.damageNumbers3d);
-    ImGui::SameLine();
-    ImGui::Checkbox("3D item names", &g_settings.itemLabels3d);
-    ImGui::Checkbox("Labels over their monsters/items (health bars, names)", &g_settings.labelsInWorld);
-    ImGui::Text("Menu content %.3f  ->  %s", g_menuContent,
-                g_hudMenuOpen ? "menu open (block in place)" : "no menu");
-    ImGui::SliderFloat("Menu open above (menu content)", &g_settings.hudMenuCoverage, 0.02f, 0.5f, "%.2f");
-    if (ImGui::Button("Recentre view")) g_recenterRequested = true;
-    ImGui::SameLine();
     if (ImGui::Button("Reset placement")) {
       const Settings d;
       g_settings.hudDistance = d.hudDistance;
@@ -1570,22 +1710,15 @@ void DrawDebugUI() {
       g_settings.hudSideHeight = d.hudSideHeight;
       g_settings.hudMenuCoverage = d.hudMenuCoverage;
     }
-  }
-
-  if (ImGui::CollapsingHeader("HUD look", ImGuiTreeNodeFlags_DefaultOpen)) {
-    ImGui::Text("Scene brightness %.3f  ->  daylight %.2f", g_hudLum, g_hudDayAmount);
+    ImGui::SeparatorText("Look");
     ImGui::SliderFloat("Brightness", &g_settings.hudBrightness, 0.1f, 1.5f);
     ImGui::SliderFloat("Opacity", &g_settings.hudOpacity, 0.1f, 1.0f);
-    ImGui::SliderFloat("Solid dark parts", &g_settings.hudAlphaBoost, 1.0f, 8.0f);
     ImGui::Checkbox("Stronger backing in daylight", &g_settings.hudDayAdapt);
-    ImGui::SameLine();
-    ImGui::Checkbox("Preview daylight", &g_settings.hudForceDaylight);
     ImGui::SliderFloat("Night halo strength", &g_settings.hudHalo, 0.0f, 1.0f);
     ImGui::SliderFloat("Night halo size (px)", &g_settings.hudHaloRadius, 1.0f, 32.0f);
     ImGui::SliderFloat("Day halo strength", &g_settings.hudHaloDay, 0.0f, 1.0f);
     ImGui::SliderFloat("Day halo size (px)", &g_settings.hudHaloRadiusDay, 1.0f, 32.0f);
-    ImGui::SliderFloat("Night below brightness", &g_settings.hudDayFrom, 0.0f, 0.6f);
-    ImGui::SliderFloat("Full day above brightness", &g_settings.hudDayTo, 0.05f, 0.8f);
+    ImGui::Checkbox("Start-up credit", &g_settings.credit);
     if (ImGui::Button("Reset HUD look")) {
       const Settings d;
       g_settings.hudBrightness = d.hudBrightness;
@@ -1599,26 +1732,53 @@ void DrawDebugUI() {
       g_settings.hudDayFrom = d.hudDayFrom;
       g_settings.hudDayTo = d.hudDayTo;
     }
+    ImGui::SeparatorText("In the world");
+    ImGui::Checkbox("3D damage numbers", &g_settings.damageNumbers3d);
+    ImGui::SameLine();
+    ImGui::Checkbox("3D item names", &g_settings.itemLabels3d);
+    ImGui::Checkbox("Labels over their monsters/items (health bars, names)", &g_settings.labelsInWorld);
+    ImGui::EndTabItem();
   }
 
-  if (ImGui::CollapsingHeader("Pointer", ImGuiTreeNodeFlags_DefaultOpen)) {
+  if (ImGui::BeginTabItem("Hands")) {
+    ImGui::SeparatorText("Pointer");
     ImGui::Checkbox("Pure controller (gamepad mode, no laser)", &g_settings.pureController);
     ImGui::Checkbox("Controller laser", &g_settings.pointer);
     ImGui::SameLine();
     ImGui::RadioButton("Left hand", &g_settings.pointerHand, 0);
     ImGui::SameLine();
     ImGui::RadioButton("Right hand", &g_settings.pointerHand, 1);
-    ImGui::SliderFloat("Stick turn speed (deg/s)", &g_settings.stickTurnDegPerSec, 30.0f, 240.0f, "%.0f");
+    ImGui::SeparatorText("Bottom bar on the off hand");
+    ImGui::Checkbox("Bottom bar on the off hand (the hand without the laser)", &g_settings.handHud);
+    ImGui::SliderFloat("Hand HUD size (m wide)", &g_settings.handHudWidth, 0.12f, 0.6f, "%.2f");
+    ImGui::SliderFloat("Above the controller (m)", &g_settings.handHudUp, -0.05f, 0.25f, "%.2f");
+    ImGui::SliderFloat("Towards you (m)", &g_settings.handHudBack, -0.15f, 0.25f, "%.2f");
+    ImGui::SliderFloat("Tilt up (deg)", &g_settings.handHudTiltDeg, -30.0f, 90.0f, "%.0f");
+    ImGui::SeparatorText("Player windows on the off hand");
+    ImGui::Checkbox("Player windows on the off hand (inventory, character, skills...)", &g_settings.handMenus);
+    ImGui::Checkbox("Hide the bottom bar while a menu is open", &g_settings.hideBarInMenus);
+    ImGui::SliderFloat("Window size (m for the HUD's height)", &g_settings.handMenuSize, 0.2f, 1.2f, "%.2f");
+    ImGui::SliderFloat("Window above the controller (m)", &g_settings.handMenuUp, -0.1f, 0.2f, "%.2f");
+    ImGui::SliderFloat("Window tilt up (deg)", &g_settings.handMenuTiltDeg, -30.0f, 90.0f, "%.0f");
+    ImGui::SeparatorText("Controllers");
+    controllers::DrawDebugUI();
+    ImGui::EndTabItem();
   }
 
-  if (ImGui::CollapsingHeader("Sky (constellations)")) {
+  if (ImGui::BeginTabItem("World")) {
+    ImGui::SliderFloat("World scale", &g_settings.worldScale, 4.0f, 40.0f, "%.1f");
+    ImGui::Checkbox("Title screen: character stands in the scene", &g_settings.titleCutout);
+    ImGui::SeparatorText("Fade to black");
+    ImGui::Checkbox("Fade mask", &g_settings.maskEnabled);
+    ImGui::SliderFloat("Fade starts (units)", &g_settings.maskInner, 10.0f, 80.0f, "%.0f");
+    ImGui::SliderFloat("Fully dark at (units)", &g_settings.maskOuter, 15.0f, 90.0f, "%.0f");
+    ImGui::SeparatorText("Contact shadows");
+    ImGui::Checkbox("Contact shadows", &g_settings.contactShadowsOn);
+    ImGui::SliderFloat("Contact shadow strength", &g_settings.contactShadows, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Contact shadow size (units)", &g_settings.contactSize, 0.2f, 4.0f, "%.1f");
+    ImGui::SliderFloat("Contact shadow softness", &g_settings.contactSoftness, 0.0f, 3.5f, "%.1f");
+    ImGui::SeparatorText("Sky (constellations)");
     ImGui::Checkbox("Sky beyond the play area (needs the fade mask)", &g_settings.sky);
-    ImGui::SameLine();
-    ImGui::Checkbox("Start-up credit", &g_settings.credit);
-    ImGui::InputText("Leave out of capture", g_settings.skySkip, sizeof(g_settings.skySkip));
-    ImGui::RadioButton("Devotion map from the game files (dome)", &g_settings.skySource, 0);
-    ImGui::SameLine();
-    ImGui::RadioButton("Screen capture (band)", &g_settings.skySource, 1);
     if (g_settings.skySource == 0) {
       ImGui::SliderFloat("Dome rim elevation (deg)", &g_settings.skyDomeHorizonDeg, -45.0f, 30.0f, "%.0f");
       ImGui::SliderFloat("Not completed: brightness", &g_settings.skyIncomplete, 0.0f, 1.0f, "%.2f");
@@ -1626,75 +1786,30 @@ void DrawDebugUI() {
     }
     sky::DrawDebugUI();
     ImGui::SliderFloat("Turn (deg)", &g_settings.skyBandYawDeg, -180.0f, 180.0f, "%.0f");
-    if (g_settings.skySource == 1) {  // screen capture only
-      ImGui::SliderFloat("Band width (deg)", &g_settings.skyBandWidthDeg, 40.0f, 360.0f, "%.0f");
-      ImGui::SliderFloat("Band bottom (deg)", &g_settings.skyBandLowDeg, -60.0f, 60.0f, "%.0f");
-      ImGui::SliderFloat("Band top (deg)", &g_settings.skyBandHighDeg, 0.0f, 90.0f, "%.0f");
-      ImGui::SliderFloat4("Crop L T R B", g_settings.skyCrop, 0.0f, 1.0f, "%.2f");
-      ImGui::SliderFloat("Background cut", &g_settings.skyKey, 0.0f, 0.6f, "%.2f");
-      ImGui::SliderFloat("Cut softness", &g_settings.skySoft, 0.01f, 0.5f, "%.2f");
-    }
     ImGui::SliderFloat("Constellation brightness", &g_settings.skyBrightness, 0.2f, 3.0f, "%.2f");
     ImGui::SliderFloat("Constellation opacity", &g_settings.skyOpacity, 0.0f, 1.0f, "%.2f");
     ImGui::SliderFloat("Backdrop brightness", &g_settings.skyBackdropBrightness, 0.0f, 2.0f, "%.2f");
+    ImGui::EndTabItem();
   }
 
-  if (ImGui::CollapsingHeader("Hand HUD (off hand)")) {
-    ImGui::Checkbox("Bottom bar on the off hand (the hand without the laser)", &g_settings.handHud);
-    ImGui::SliderFloat("Hand HUD size (m wide)", &g_settings.handHudWidth, 0.12f, 0.6f, "%.2f");
-    ImGui::SliderFloat("Above the controller (m)", &g_settings.handHudUp, -0.05f, 0.25f, "%.2f");
-    ImGui::SliderFloat("Towards you (m)", &g_settings.handHudBack, -0.15f, 0.25f, "%.2f");
-    ImGui::SliderFloat("Tilt up (deg)", &g_settings.handHudTiltDeg, -30.0f, 90.0f, "%.0f");
-    ImGui::SliderFloat4("Bar in the HUD L T R B", g_settings.handHudRect, 0.0f, 1.0f, "%.2f");
-    ImGui::Checkbox("Player windows on the off hand (inventory, character, skills...)", &g_settings.handMenus);
-    ImGui::Checkbox("Hide the bottom bar while a menu is open", &g_settings.hideBarInMenus);
-    ImGui::SliderFloat("Window size (m for the HUD's height)", &g_settings.handMenuSize, 0.2f, 1.2f, "%.2f");
-    ImGui::SliderFloat("Window above the controller (m)", &g_settings.handMenuUp, -0.1f, 0.2f, "%.2f");
-    ImGui::SliderFloat("Window tilt up (deg)", &g_settings.handMenuTiltDeg, -30.0f, 90.0f, "%.0f");
-    ImGui::SliderFloat("Widest window on the hand (share of the HUD)", &g_settings.handMenuMaxWidth, 0.2f, 1.0f, "%.2f");
-  }
-
-  if (ImGui::CollapsingHeader("Controllers")) controllers::DrawDebugUI();
-
-  if (ImGui::CollapsingHeader("Sound")) {
+  if (ImGui::BeginTabItem("Sound & mirror")) {
+    ImGui::SeparatorText("Sound");
     ImGui::Checkbox("Head-tracked sound (sounds stay in place when you turn your head)", &g_settings.headAudio);
-    audio::DrawDebugUI();
-  }
-
-  if (ImGui::CollapsingHeader("Desktop mirror (recording)")) {
+    ImGui::SeparatorText("Desktop mirror (recording)");
     ImGui::Checkbox("Show the headset view in the game window (left eye + HUD)", &g_settings.mirror);
-    ImGui::Checkbox("Title screen: character stands in the scene", &g_settings.titleCutout);
     ImGui::SliderFloat("Mirror field of view (deg)", &g_settings.mirrorFovDeg, 50.0f, 120.0f, "%.0f");
+    ImGui::EndTabItem();
   }
 
-  if (ImGui::CollapsingHeader("World")) {
-    ImGui::SliderFloat("World scale", &g_settings.worldScale, 4.0f, 40.0f, "%.1f");
-    ImGui::SliderFloat("Camera closer (units)", &g_settings.cameraPull, 0.0f, 20.0f, "%.1f");
-    ImGui::Checkbox("One culling view for both eyes (steadier grass, fewer rebuilds)", &g_settings.sharedFrustum);
-    ImGui::Checkbox("Fade mask", &g_settings.maskEnabled);
-    ImGui::SliderFloat("Fade starts (units)", &g_settings.maskInner, 10.0f, 80.0f, "%.0f");
-    ImGui::SliderFloat("Fully dark at (units)", &g_settings.maskOuter, 15.0f, 90.0f, "%.0f");
-    ImGui::Checkbox("Contact shadows", &g_settings.contactShadowsOn);
-    ImGui::SliderFloat("Contact shadow strength", &g_settings.contactShadows, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Contact shadow size (units)", &g_settings.contactSize, 0.2f, 4.0f, "%.1f");
-    ImGui::SliderFloat("Contact shadow softness", &g_settings.contactSoftness, 0.0f, 3.5f, "%.1f");
+  // Diagnostics last: its parts take the settings lock themselves.
+  const bool diag = ImGui::BeginTabItem("Diagnostics");
+  lock.unlock();
+  if (diag) {
+    DrawDiagnostics();
+    if (diagnostics) diagnostics();
+    ImGui::EndTabItem();
   }
-
-  ImGui::Separator();
-  static double savedAt = -10;
-  if (ImGui::Button("Save settings")) {
-    if (SaveSettingsLocked()) savedAt = ImGui::GetTime();
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Reset all to defaults")) {
-    const Mode mode = g_settings.mode;
-    g_settings = Settings{};
-    g_settings.mode = mode;
-  }
-  if (ImGui::GetTime() - savedAt < 3) {
-    ImGui::SameLine();
-    ImGui::TextUnformatted("Saved to control.ini");
-  }
+  ImGui::EndTabBar();
 }
 
 void DrawDiagnostics() {
@@ -1705,6 +1820,36 @@ void DrawDiagnostics() {
               g_eyeTan[0][0], g_eyeTan[0][1], g_eyeTan[1][0], g_eyeTan[1][1]);
   ImGui::Text("Scale %.1f  FOV %.0f  far %.0f  level=%d", g_settings.worldScale, g_settings.fovDeg, g_settings.farPlane,
               int(g_settings.levelHorizon));
+
+  // Tuning: internal thresholds and layout values, set by testing (moved out of the main settings).
+  ImGui::SeparatorText("Tuning");
+  ImGui::Checkbox("One culling view for both eyes (steadier grass, fewer rebuilds)", &g_settings.sharedFrustum);
+  ImGui::Text("Menu content %.3f  ->  %s", g_menuContent, g_hudMenuOpen ? "menu open (block in place)" : "no menu");
+  ImGui::SliderFloat("Menu open above (menu content)", &g_settings.hudMenuCoverage, 0.02f, 0.5f, "%.2f");
+  ImGui::Checkbox("Show minimap block outline", &g_settings.hudSideOutline);
+  ImGui::SliderFloat4("Bottom bar in the HUD L T R B", g_settings.handHudRect, 0.0f, 1.0f, "%.2f");
+  ImGui::SliderFloat("Widest window on the hand (share of the HUD)", &g_settings.handMenuMaxWidth, 0.2f, 1.0f, "%.2f");
+  ImGui::Text("Scene brightness %.3f  ->  daylight %.2f", g_hudLum, g_hudDayAmount);
+  ImGui::Checkbox("Preview daylight HUD backing", &g_settings.hudForceDaylight);
+  ImGui::SliderFloat("Night below brightness", &g_settings.hudDayFrom, 0.0f, 0.6f);
+  ImGui::SliderFloat("Full day above brightness", &g_settings.hudDayTo, 0.05f, 0.8f);
+  ImGui::SliderFloat("HUD solid dark parts", &g_settings.hudAlphaBoost, 1.0f, 8.0f);
+  ImGui::TextUnformatted("Sound:");
+  ImGui::SameLine();
+  audio::DrawDebugUI();
+  ImGui::SeparatorText("Sky: screen-capture band (older method)");
+  ImGui::RadioButton("Devotion map from the game files (dome)", &g_settings.skySource, 0);
+  ImGui::SameLine();
+  ImGui::RadioButton("Screen capture (band)", &g_settings.skySource, 1);
+  if (g_settings.skySource == 1) {
+    ImGui::InputText("Leave out of capture", g_settings.skySkip, sizeof(g_settings.skySkip));
+    ImGui::SliderFloat("Band width (deg)", &g_settings.skyBandWidthDeg, 40.0f, 360.0f, "%.0f");
+    ImGui::SliderFloat("Band bottom (deg)", &g_settings.skyBandLowDeg, -60.0f, 60.0f, "%.0f");
+    ImGui::SliderFloat("Band top (deg)", &g_settings.skyBandHighDeg, 0.0f, 90.0f, "%.0f");
+    ImGui::SliderFloat4("Crop L T R B", g_settings.skyCrop, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Background cut", &g_settings.skyKey, 0.0f, 0.6f, "%.2f");
+    ImGui::SliderFloat("Cut softness", &g_settings.skySoft, 0.01f, 0.5f, "%.2f");
+  }
 }
 
 }  // namespace gdvr::xr

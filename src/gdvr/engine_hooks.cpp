@@ -362,6 +362,10 @@ bool g_titleAnchorValid = false;
 float g_titleT = 30;          // distance from the game camera along the ray to the spot
 int g_titleSteady = 0;        // frames the guess has barely moved (30: found, kept)
 bool g_lastInWorld = true;
+// Smooth follow: where the viewpoint thinks the character is (lags the real position).
+Vec3 g_followPos;
+bool g_followValid = false;
+double g_followAt = 0;
 
 // Renders the scene once per eye: the game camera is replaced by the eye's camera
 // (game camera + head pose), the result is captured for the headset, and the camera is restored.
@@ -398,13 +402,55 @@ void RenderStereo(gd::GraphicsMTRenderer* self, const gd::Camera* camera, gd::Re
     const Vec3 toTarget = target - origin;
     const float dist = std::sqrt(Dot(toTarget, toTarget));
     const bool haveTarget = t[kTargetPos] != 0 || t[kTargetPos + 1] != 0 || t[kTargetPos + 2] != 0;
-    if (s.cameraPull > 0 && haveTarget && dist > 1e-3f && HavePlayer())  // not on the title screen
+    const bool inWorld = haveTarget && HavePlayer();  // not on the title screen
+    if (s.cameraPull > 0 && inWorld && dist > 1e-3f)
       origin = origin + toTarget * (std::min(s.cameraPull, std::max(0.0f, dist - 4.0f)) / dist);
+
+    // Camera angle of our own: the same distance from the character (so the game's zoom still works) but
+    // at this elevation above it, on the game camera's side. The game's camera itself is left alone.
+    if (s.cameraAngleDeg > 0 && inWorld) {
+      const Vec3 offset = origin - target;
+      const float d = std::sqrt(Dot(offset, offset));
+      Vec3 back{offset.x, 0, offset.z};
+      const float backLen = std::sqrt(Dot(back, back));
+      back = backLen > 1e-3f ? back * (1.0f / backLen) : Normalize(Vec3{-fwd.x, 0, -fwd.z});
+      const float a = s.cameraAngleDeg * 3.14159265f / 180.0f;
+      if (d > 1e-3f) {
+        origin = target + (back * std::cos(a) + Vec3{0, 1, 0} * std::sin(a)) * d;
+        fwd = Normalize(target - origin);
+        right = Normalize(Cross(fwd, Vec3{0, 1, 0}));
+        up = Cross(right, fwd);
+      }
+    }
+
+    // Smooth follow: the viewpoint keeps the game's offset from the character (so the game's zoom and
+    // rotation stay immediate) but follows a smoothed copy of the character's position, so starting,
+    // stopping and stepping don't jolt the whole world. Big jumps (teleports, loading) snap.
+    const double now = NowMs();
+    const float dt = g_followAt > 0 ? float(std::clamp((now - g_followAt) / 1000.0, 0.0, 0.1)) : 0.0f;
+    g_followAt = now;
+    const Vec3 err = target - g_followPos;
+    const float errLen = std::sqrt(Dot(err, err));
+    if (!inWorld || !g_followValid || errLen > 25.0f || (s.cameraSmooth <= 0 && s.cameraDeadzone <= 0)) {
+      g_followPos = target;
+      g_followValid = inWorld;
+    } else if (errLen > s.cameraDeadzone) {
+      const float k = s.cameraSmooth > 0 ? 1.0f - std::exp(-dt / (s.cameraSmooth / 3.0f)) : 1.0f;
+      g_followPos = g_followPos + err * ((errLen - s.cameraDeadzone) / errLen * k);
+    }
+    if (inWorld) origin = origin + (g_followPos - target);
   }
   if (s.levelHorizon) {
     fwd = Normalize({fwd.x, 0, fwd.z});
     up = {0, 1, 0};
     right = Cross(fwd, up);
+  }
+  if (s.viewTiltDeg != 0) {
+    // Tilt the world towards you: looking straight ahead shows the ground nearer the character.
+    const float t = s.viewTiltDeg * 3.14159265f / 180.0f;
+    const Vec3 f = fwd * std::cos(t) - up * std::sin(t);
+    up = up * std::cos(t) + fwd * std::sin(t);
+    fwd = f;
   }
   auto toWorld = [&](Vec3 v) { return right * v.x + up * v.y + fwd * v.z; };
   labels::SetStereoFrame(origin, right, up, fwd, s.worldScale);  // for placing labels this frame
@@ -816,6 +862,11 @@ void PollControlFile() {
   vr.labelsInWorld = getInt(L"labels_in_world", vr.labelsInWorld) != 0;
   vr.damageNumbers3d = getInt(L"damage_numbers_3d", vr.damageNumbers3d) != 0;
   vr.cameraPull = getFloat(L"camera_pull", vr.cameraPull);
+  vr.cameraSmooth = std::clamp(getFloat(L"camera_smooth", vr.cameraSmooth), 0.0f, 2.0f);
+  vr.cameraDeadzone = std::clamp(getFloat(L"camera_deadzone", vr.cameraDeadzone), 0.0f, 10.0f);
+  vr.cameraAngleDeg = std::clamp(getFloat(L"camera_angle", vr.cameraAngleDeg), 0.0f, 85.0f);
+  vr.viewTiltDeg = std::clamp(getFloat(L"view_tilt", vr.viewTiltDeg), -20.0f, 60.0f);
+  vr.zoomSpeed = std::clamp(getFloat(L"zoom_speed", vr.zoomSpeed), 0.1f, 2.0f);
   vr.contactShadowsOn = getInt(L"contact_shadows_on", vr.contactShadowsOn) != 0;
   vr.contactShadows = getFloat(L"contact_shadows", vr.contactShadows);
   vr.contactSoftness = std::clamp(getFloat(L"contact_softness", vr.contactSoftness), 0.0f, 3.5f);
@@ -978,23 +1029,21 @@ void OnFramePresented() {
 
 int InFlight() { return g_inFlight.load(); }
 
-void DrawDebugUI() {
+void DrawDebugUI(bool* open) {
   const float scale = ImGui::GetIO().FontGlobalScale;
   ImGui::SetNextWindowSize(ImVec2(520 * scale, 640 * scale), ImGuiCond_FirstUseEver);
-  ImGui::Begin("Grim Dawn VR " GDVR_VERSION "  (F8 hide)###gdvr");
+  ImGui::Begin("Grim Dawn VR " GDVR_VERSION "  (F8 hide)###gdvr", open);
   {
     const ImVec2 pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize(), screen = ImGui::GetIO().DisplaySize;
     if (screen.x > 0 && screen.y > 0)
       xr::SetDebugWindowRect(pos.x / screen.x, pos.y / screen.y, (pos.x + size.x) / screen.x, (pos.y + size.y) / screen.y);
   }
-  xr::DrawDebugUI();
-  if (ImGui::CollapsingHeader("Diagnostics")) {
-    xr::DrawDiagnostics();
+  xr::DrawDebugUI([] {
     labels::DrawDebugUI();
     numbers::DrawDebugUI();
     pointer::DrawDebugUI();
     input::DrawDebugUI();
-  }
+  });
   ImGui::End();
 }
 

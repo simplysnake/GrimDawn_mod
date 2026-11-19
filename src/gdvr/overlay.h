@@ -39,6 +39,9 @@ void DrawWorld(const WorldText* texts, int textCount, const Polyline* lines, int
 // The game's window (null until the first frame).
 HWND GameWindow();
 
+// Shows / hides the settings (F8) window, like pressing F8.
+void ToggleMenu();
+
 // GetTickCount64() when the game last presented a frame (0: not yet).
 unsigned long long LastPresentTick();
 

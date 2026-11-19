@@ -20,6 +20,11 @@ struct Settings {
   float screenDistance = 2.0f;  // Screen mode: metres in front of you
   float screenWidth = 3.0f;     // Screen mode: metres wide
   float cameraPull = 6.0f;       // game units the viewpoint moves towards the character (closer zoom range)
+  float cameraSmooth = 0.35f;    // seconds the viewpoint takes to catch up with the character (0 = locked to it)
+  float cameraDeadzone = 0.0f;   // game units the character can move before the viewpoint follows at all
+  float cameraAngleDeg = 0.0f;   // viewpoint elevation above the character (0 = the game's own angle)
+  float viewTiltDeg = 0.0f;      // world tilted towards you (0 = straight ahead is the game's horizon)
+  float zoomSpeed = 0.6f;        // camera zoom speed (stick and touch pad), 1 = the old speed
   bool contactShadowsOn = true;   // contact shadows on/off (keeps the strength below)
   float contactShadows = 0.6f;   // darkening where grass, rocks and characters meet the ground (0 = off)
   float contactSoftness = 1.5f;  // ...how soft (blur level)
@@ -154,6 +159,12 @@ long DeviceRemovedReason();
 
 // Where the F8 window is (fractions of the game image), each frame it is drawn: left out of menu detection.
 void SetDebugWindowRect(float x0, float y0, float x1, float y1);
+// Where the settings gear is, each frame it is drawn; `onHand`: beside the bottom bar, on the hand panel.
+void SetSettingsIconRect(float x0, float y0, float x1, float y1, bool onHand);
+// The bottom bar is on the off hand now; `rect` gets its place in the HUD image.
+bool HandBarShown(float rect[4]);
+// Whether the F8 window or the settings gear is shown at this HUD image position.
+bool DebugWindowAt(float u, float v);
 
 // Title screen: the character picture's rect in the menu layer (fractions u0 v0 u1 v1), if found.
 bool TitleCutout(float rect[4]);
@@ -178,7 +189,8 @@ void PrepareHud();
 // Releases the session and everything else (on unload).
 void Shutdown();
 
-void DrawDebugUI();      // settings: HUD placement/look, world, save
+// The settings window's contents, in tabs; `diagnostics` adds to the Diagnostics tab.
+void DrawDebugUI(void (*diagnostics)() = nullptr);
 void DrawDiagnostics();  // session details
 
 // Saves the next frame's eye images to %LOCALAPPDATA%\gdvr\eye0.bmp / eye1.bmp (also F11).
