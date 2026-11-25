@@ -4,8 +4,10 @@
 
 #include <MinHook.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <mutex>
 #include <vector>
 #include <cstdint>
@@ -211,6 +213,26 @@ void LogWindow(double seconds) {
     len += snprintf(line + len, sizeof(line) - len, " | gpu eye %.1f + %.1f, after eyes %.1f, gpu frame %.1f",
                     w.gpuEye[0] / g, w.gpuEye[1] / g, w.gpuPost / g, w.gpuFrame / g);
   }
+  // Players' logs: every 10 s, and whenever the frame rate drops or jumps (a stutter stays visible).
+  // Development builds: every second (tools/sweep.ps1 reads them).
+#ifndef GDVR_DEV_LOG_DIR
+  static int skipped = 0;
+  static double loggedFps = 0;
+  const double fps = n / seconds;
+  const bool changed = std::fabs(fps - loggedFps) > std::max(5.0, loggedFps * 0.15);
+  if (++skipped < 10 && !changed) {
+    for (int i = 0; i < kStageCount; ++i) {  // (the stage counters still start over each window)
+      g_stageBase[i] = g_stages[i].ticks.load();
+      g_stages[i].calls = 0;
+      g_stages[i].eyeCalls[0] = 0;
+      g_stages[i].eyeCalls[1] = 0;
+      g_stages[i].trueCalls = 0;
+    }
+    return;
+  }
+  skipped = 0;
+  loggedFps = fps;
+#endif
   Log("%s", line);
 
   // Stages: average ms per frame and calls per frame, biggest first is easy to read by eye.

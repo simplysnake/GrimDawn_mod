@@ -137,6 +137,27 @@ std::vector<std::string> VdfValues(const std::string& text, const std::string& k
   return out;
 }
 
+// The Grim Dawn folder has x64\Grim Dawn.exe (Steam and GOG alike).
+bool HasGame(const fs::path& dir) {
+  std::error_code ec;
+  return !dir.empty() && fs::exists(dir / L"x64" / L"Grim Dawn.exe", ec);
+}
+
+// The Grim Dawn folder from what was given with --game-dir: the folder itself, its x64 folder, or an exe in
+// either. A trailing backslash before the closing quote ("C:\Games\Grim Dawn\") reaches the program as a
+// quote at the end of the path (that's how Windows splits command lines), so stray quotes and slashes go.
+fs::path GameDirFrom(std::wstring s) {
+  auto strip = [](wchar_t c) { return c == L'"' || c == L' ' || c == L'\\' || c == L'/'; };
+  while (!s.empty() && strip(s.back())) s.pop_back();
+  while (!s.empty() && (s.front() == L'"' || s.front() == L' ')) s.erase(s.begin());
+  if (s.size() == 2 && s[1] == L':') s += L'\\';  // a drive root
+  fs::path p(s);
+  std::error_code ec;
+  if (fs::is_regular_file(p, ec)) p = p.parent_path();
+  if (_wcsicmp(p.filename().c_str(), L"x64") == 0) p = p.parent_path();
+  return p;
+}
+
 fs::path FindGame() {
   const fs::path steam = RegString(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath");
   if (steam.empty()) return {};
@@ -380,14 +401,26 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   const fs::path home = fs::path(self).parent_path();
 
   fs::path gameDir;
+  std::wstring gameDirArg;  // as given with --game-dir (for the message if it isn't the game)
   std::wstring mode;
   std::vector<std::wstring> rest;
   int argc = 0;
   wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   for (int i = 1; argv && i < argc; ++i) {
-    if (_wcsicmp(argv[i], L"--game-dir") == 0 && i + 1 < argc) gameDir = argv[++i];
-    else if (argv[i][0] == L'-' && argv[i][1] == L'-') mode = argv[i];
-    else rest.push_back(argv[i]);
+    if (_wcsicmp(argv[i], L"--game-dir") == 0 && i + 1 < argc) {
+      // An unquoted path with spaces arrives in pieces: put them back together until it is the game.
+      gameDirArg = argv[++i];
+      while (!HasGame(GameDirFrom(gameDirArg)) && i + 1 < argc && argv[i + 1][0] != L'-')
+        gameDirArg += L" " + std::wstring(argv[++i]);
+      gameDir = GameDirFrom(gameDirArg);
+    } else if (_wcsnicmp(argv[i], L"--game-dir=", 11) == 0) {
+      gameDirArg = argv[i] + 11;
+      gameDir = GameDirFrom(gameDirArg);
+    } else if (argv[i][0] == L'-' && argv[i][1] == L'-') {
+      mode = argv[i];
+    } else {
+      rest.push_back(argv[i]);
+    }
   }
   LocalFree(argv);
 
@@ -405,16 +438,39 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                      detail);
   }
 
+  // A folder given once with --game-dir is remembered, so the Start-menu and Steam shortcuts find it too.
+  const fs::path rememberedDir = userDir / L"game_dir.txt";
+  if (gameDir.empty()) {
+    FILE* f = nullptr;
+    wchar_t line[MAX_PATH * 2] = L"";
+    if (_wfopen_s(&f, rememberedDir.c_str(), L"r, ccs=UTF-8") == 0 && f) {
+      if (!fgetws(line, MAX_PATH * 2, f)) line[0] = 0;
+      fclose(f);
+    }
+    std::wstring s = line;
+    while (!s.empty() && (s.back() == L'\n' || s.back() == L'\r')) s.pop_back();
+    if (HasGame(GameDirFrom(s))) gameDir = GameDirFrom(s);
+  }
   if (gameDir.empty()) gameDir = FindGame();
   if (mode == L"--uninstall") return Uninstall(gameDir, self);
   if (!mode.empty()) return Fail(L"Unknown option " + mode);
 #ifdef GDVR_DEV
   if (gameDir.empty()) gameDir = GDVR_GAME_DIR;
 #endif
-  if (gameDir.empty() || !fs::exists(gameDir / L"x64" / L"Grim Dawn.exe", ec))
+  if (!gameDirArg.empty() && !HasGame(gameDir))
+    return Fail(L"Grim Dawn was not found in the folder given with --game-dir:\n\n" + gameDirArg +
+                L"\n\nIt should be the Grim Dawn folder: the one with the x64 folder that has Grim Dawn.exe in it.");
+  if (!HasGame(gameDir))
     return Fail(L"Grim Dawn was not found in your Steam libraries.\n\nStart the launcher with "
                 L"--game-dir \"<Grim Dawn folder>\" to point it there.");
   Logf(L"game: %s", gameDir.c_str());
+  if (!gameDirArg.empty()) {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, rememberedDir.c_str(), L"w, ccs=UTF-8") == 0 && f) {
+      fwprintf(f, L"%s\n", gameDir.c_str());
+      fclose(f);
+    }
+  }
 
   if (IsRunning(L"Grim Dawn.exe"))
     return Fail(L"Grim Dawn is already running. Close it, then start Grim Dawn VR again.");

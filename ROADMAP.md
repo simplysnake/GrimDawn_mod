@@ -98,7 +98,8 @@ One pipeline: a point in the 3D world becomes the game's mouse position. Sources
   (Through SteamVR, Meta controllers already work and are rebindable like Index.)
 
 ### 9. Haptics – small
-- Route the game's controller rumble (hits, explosions) to the VR controllers.
+- Controller vibration (done): the game has no rumble of its own, so the mod makes it from hits taken, big heals,
+  death and your own hits (stronger on crits); strength in F8.
 
 ### 10. Performance – ongoing
 - Test in heavy combat (profiler logs automatically).
@@ -121,7 +122,8 @@ One pipeline: a point in the 3D world becomes the game's mouse position. Sources
 - Startup self-check of the hard-coded layouts found by experiment (per-frame settings at `renderer+0x1E0`,
   camera-target layout, camera axis order); disable the affected feature with a clear message if a game
   patch moved them.
-- Graceful fallback to flat mode if SteamVR closes or crashes mid-game.
+- Graceful fallback to flat mode if SteamVR closes or crashes mid-game (done): the game plays on flat with mouse,
+  keyboard and gamepad, and VR comes back by itself when SteamVR runs again.
 - Multiplayer check: confirm online co-op behaves normally with the mod.
 
 ### 13. Distribution (if shared) – medium

@@ -10,6 +10,7 @@
 #include <mutex>
 #include <vector>
 
+#include "haptics.h"
 #include "log.h"
 #include "overlay.h"
 #include "xr.h"
@@ -86,12 +87,16 @@ bool ReadEvent(const unsigned char* e, float pos[3], wchar_t* text, size_t textM
 void HookSend(void* manager, const void* event, unsigned type) {
   ++g_inFlight;
   bool swallow = false;
-  if (type == kCombatTextEvent && event && xr::GetSettings().damageNumbers3d && StereoOn()) {
+  if (type == kCombatTextEvent && event && StereoOn()) {
     float pos[3];
     wchar_t wide[48];
     unsigned style = 0;
     float scale = 1;
-    if (ReadEvent(static_cast<const unsigned char*>(event), pos, wide, 48, style, scale)) {
+    const bool read = ReadEvent(static_cast<const unsigned char*>(event), pos, wide, 48, style, scale);
+    if (read) haptics::OnHit(style == kStyleCrit);  // controller tick for the hit
+    if (!xr::GetSettings().damageNumbers3d) {
+      // the game's flat UI draws it
+    } else if (read) {
       Number n{};
       n.pos = {pos[0], pos[1], pos[2]};
       WideCharToMultiByte(CP_UTF8, 0, wide, -1, n.text, sizeof(n.text), nullptr, nullptr);

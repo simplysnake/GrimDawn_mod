@@ -14,6 +14,7 @@
 #include <cmath>
 
 #include "engine_hooks.h"
+#include "input.h"
 #include "log.h"
 #include "d3dtrace.h"
 #include "mask.h"
@@ -161,6 +162,30 @@ void UnpatchVtable() {
 }
 
 // The settings gear (opens and closes the window): only in VR with the laser, and not over a game menu.
+// Gamepad play in VR: the game's cursor (which the gamepad's stick moves in menus) doesn't reach the image
+// the headset shows, so the mod draws one where it is. While a real gamepad is in use, the laser isn't
+// driving the mouse, the F8 window (which draws its own) is closed, and a menu is open or the cursor moved
+// in the last 3 s. `pos`: in the game window's client pixels.
+bool PadCursor(ImVec2& pos) {
+  static POINT last{};
+  static ULONGLONG movedAt = 0;
+  POINT p;
+  if (!g_window || !GetCursorPos(&p)) return false;
+  if (p.x != last.x || p.y != last.y) {
+    last = p;
+    movedAt = GetTickCount64();
+  }
+  float fx, fy;
+  if (g_menuVisible || input::SecondsSinceRealPad() > 10 || pointer::CursorFeed(fx, fy) || !xr::StereoFrameActive())
+    return false;
+  if (!xr::HudMenuOpen() && GetTickCount64() - movedAt > 3000) return false;
+  RECT rc{};
+  if (!ScreenToClient(g_window, &p) || !GetClientRect(g_window, &rc)) return false;
+  if (p.x < 0 || p.y < 0 || p.x >= rc.right || p.y >= rc.bottom) return false;
+  pos = ImVec2(float(p.x), float(p.y));
+  return true;
+}
+
 bool ShowSettingsIcon() {
   const xr::Settings& s = xr::GetSettings();
   return xr::StereoFrameActive() && s.pointer && !s.pureController && !xr::HudMenuOpen();
@@ -246,7 +271,11 @@ HRESULT Frame(PresentFn next, IDXGISwapChain* swapChain, UINT syncInterval, UINT
 
   // With the window hidden in VR, a small icon on the HUD panel opens it again with the laser.
   g_iconShown = ShowSettingsIcon();
-  const bool drawUi = g_menuVisible || g_iconShown;
+  std::string notice;  // SteamVR went away and the game is flat (on the monitor)
+  const bool showNotice = xr::FallbackNotice(notice);
+  ImVec2 padPos;
+  const bool padCursor = PadCursor(padPos);
+  const bool drawUi = g_menuVisible || g_iconShown || showNotice || padCursor;
   if (g_imguiReady && drawUi && !g_uiBroken) {
     if (!g_rtv) CreateRtv(swapChain);
     ImGui_ImplDX11_NewFrame();
@@ -260,7 +289,8 @@ HRESULT Frame(PresentFn next, IDXGISwapChain* swapChain, UINT syncInterval, UINT
   }
   if (g_imguiReady && drawUi && !g_uiBroken) {
     ImGui_ImplWin32_NewFrame();
-    ImGui::GetIO().MouseDrawCursor = g_menuVisible;
+    ImGui::GetIO().MouseDrawCursor = g_menuVisible || padCursor;
+    if (padCursor) ImGui::GetIO().AddMousePosEvent(padPos.x, padPos.y);
     {
       // The controller laser on the window works it like a mouse (after the Win32 backend, so it wins).
       ImGuiIO& io = ImGui::GetIO();
@@ -285,6 +315,16 @@ HRESULT Frame(PresentFn next, IDXGISwapChain* swapChain, UINT syncInterval, UINT
       if (!open) g_menuVisible = false;
     }
     if (g_iconShown && DrawSettingsIcon()) g_menuVisible = !g_menuVisible;
+    if (showNotice) {
+      const ImVec2 size = ImGui::GetIO().DisplaySize;
+      ImGui::SetNextWindowPos(ImVec2(size.x * 0.5f, size.y * 0.06f), ImGuiCond_Always, ImVec2(0.5f, 0));
+      ImGui::SetNextWindowBgAlpha(0.75f);
+      ImGui::Begin("##vrnotice", nullptr,
+                   ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+      ImGui::TextUnformatted(notice.c_str());
+      ImGui::End();
+    }
     ImGui::Render();
     g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());

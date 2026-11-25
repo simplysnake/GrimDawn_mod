@@ -43,6 +43,12 @@ struct TouchPads {
 };
 TouchPads Pads();
 
+// Seconds since a real gamepad (not the VR controllers) was last used; huge if never.
+double SecondsSinceRealPad();
+
+// Vibrates a controller (0 left, 1 right; amplitude 0..1), sent with the next Sync. Any thread.
+void Vibrate(int hand, float amplitude, float seconds);
+
 // Forgets the action set (call before the session/instance are destroyed).
 void DestroyActions();
 

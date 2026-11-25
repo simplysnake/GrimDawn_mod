@@ -46,6 +46,7 @@ DWORD WINAPI Watchdog(LPVOID) {
   bool dumped = false;
   while (!g_stopping) {
     Sleep(1000);
+    gdvr::xr::WatchRuntime();
     const ULONGLONG last = gdvr::overlay::LastPresentTick();
     if (!last) continue;
     const ULONGLONG stalled = GetTickCount64() - last;

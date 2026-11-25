@@ -37,6 +37,7 @@ enum ActionId {
   kLeftPad, kRightPad, kLeftPadTouch, kRightPadTouch,
   kRecenter,
   kAimPose,
+  kHaptic,
   kActionCount
 };
 
@@ -71,6 +72,7 @@ const ActionDef kActions[kActionCount] = {
     {"right_pad_touch", "Right touch pad touched", XR_ACTION_TYPE_BOOLEAN_INPUT},
     {"recenter", "Recenter view", XR_ACTION_TYPE_BOOLEAN_INPUT},
     {"aim", "Pointer (laser aim)", XR_ACTION_TYPE_POSE_INPUT},
+    {"haptic", "Vibration", XR_ACTION_TYPE_VIBRATION_OUTPUT},
 };
 
 struct Binding {
@@ -101,6 +103,8 @@ const Binding kIndexBindings[] = {
     {kRightPadTouch, "/user/hand/right/input/trackpad/touch"},
     {kAimPose, "/user/hand/left/input/aim/pose"},
     {kAimPose, "/user/hand/right/input/aim/pose"},
+    {kHaptic, "/user/hand/left/output/haptic"},
+    {kHaptic, "/user/hand/right/output/haptic"},
 };
 
 const Binding kTouchBindings[] = {
@@ -119,6 +123,8 @@ const Binding kTouchBindings[] = {
     {kStart, "/user/hand/left/input/menu/click"},
     {kAimPose, "/user/hand/left/input/aim/pose"},
     {kAimPose, "/user/hand/right/input/aim/pose"},
+    {kHaptic, "/user/hand/left/output/haptic"},
+    {kHaptic, "/user/hand/right/output/haptic"},
 };
 
 const Binding kViveBindings[] = {
@@ -134,6 +140,8 @@ const Binding kViveBindings[] = {
     {kBack, "/user/hand/left/input/menu/click"},
     {kAimPose, "/user/hand/left/input/aim/pose"},
     {kAimPose, "/user/hand/right/input/aim/pose"},
+    {kHaptic, "/user/hand/left/output/haptic"},
+    {kHaptic, "/user/hand/right/output/haptic"},
 };
 
 const Binding kWmrBindings[] = {
@@ -151,6 +159,8 @@ const Binding kWmrBindings[] = {
     {kBack, "/user/hand/left/input/menu/click"},
     {kAimPose, "/user/hand/left/input/aim/pose"},
     {kAimPose, "/user/hand/right/input/aim/pose"},
+    {kHaptic, "/user/hand/left/output/haptic"},
+    {kHaptic, "/user/hand/right/output/haptic"},
 };
 const Binding kSimpleBindings[] = {
     {kA, "/user/hand/right/input/select/click"},
@@ -159,6 +169,8 @@ const Binding kSimpleBindings[] = {
     {kBack, "/user/hand/left/input/menu/click"},
     {kAimPose, "/user/hand/left/input/aim/pose"},
     {kAimPose, "/user/hand/right/input/aim/pose"},
+    {kHaptic, "/user/hand/left/output/haptic"},
+    {kHaptic, "/user/hand/right/output/haptic"},
 };
 
 struct Profile {
@@ -187,6 +199,34 @@ std::atomic<bool> g_handConnected[2] = {};  // a controller is reported for each
 bool g_aimTracked[2] = {};                   // ...and its position is tracked (last LocateAim)
 std::mutex g_profileMutex;
 std::string g_handProfile[2];                // interaction profile path per hand ("" = none)
+
+// Vibration queued by Vibrate (any thread), sent in Sync: the strongest request per hand since the last one.
+std::mutex g_hapticMutex;
+float g_hapticAmp[2] = {};
+float g_hapticSecs[2] = {};
+
+void ApplyHaptics(XrSession session) {
+  float amp[2], secs[2];
+  {
+    std::lock_guard lock(g_hapticMutex);
+    for (int h = 0; h < 2; ++h) {
+      amp[h] = g_hapticAmp[h];
+      secs[h] = g_hapticSecs[h];
+      g_hapticAmp[h] = g_hapticSecs[h] = 0;
+    }
+  }
+  for (int h = 0; h < 2; ++h) {
+    if (amp[h] <= 0) continue;
+    XrHapticActionInfo hi{XR_TYPE_HAPTIC_ACTION_INFO};
+    hi.action = g_actions[kHaptic];
+    hi.subactionPath = g_handPaths[h];
+    XrHapticVibration v{XR_TYPE_HAPTIC_VIBRATION};
+    v.amplitude = amp[h];
+    v.duration = XrDuration(double(secs[h]) * 1e9);
+    v.frequency = XR_FREQUENCY_UNSPECIFIED;
+    xrApplyHapticFeedback(session, &hi, reinterpret_cast<const XrHapticBaseHeader*>(&v));
+  }
+}
 
 // ---- Virtual gamepad ---------------------------------------------------------------------
 std::mutex g_padMutex;
@@ -228,6 +268,7 @@ using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 XInputGetStateFn g_origGetState = nullptr;
 std::atomic<int> g_inFlight{0};
 std::atomic<int> g_realPadSeen{0};
+std::atomic<unsigned long long> g_realPadBusyAt{0};  // GetTickCount64() when a real gamepad was last used
 
 SHORT ToStick(float v) {
   v = std::fmax(-1.0f, std::fmin(1.0f, v));
@@ -261,17 +302,23 @@ DWORD WINAPI HookXInputGetState(DWORD userIndex, XINPUT_STATE* state) {
       packet = g_padPacket;
     }
     if (result == ERROR_SUCCESS) g_realPadSeen = 1;
-    // Diagnostic: when anything is moving or pressed, log real and virtual pad (at most every 300 ms).
+    // Diagnostic: when anything is moving or pressed, log real and virtual pad: when the buttons change (at
+    // most every 300 ms), else every 10 s. (Every 300 ms while busy filled a gamepad player's log to 90 MB.)
     {
       static ULONGLONG lastLog = 0;
+      static WORD lastButtons = 0;
       const XINPUT_GAMEPAD& r = state->Gamepad;
       auto busy = [](const XINPUT_GAMEPAD& g) {
         return g.wButtons || g.bLeftTrigger > 30 || g.bRightTrigger > 30 || std::abs(g.sThumbLX) > 8000 ||
                std::abs(g.sThumbLY) > 8000 || std::abs(g.sThumbRX) > 8000 || std::abs(g.sThumbRY) > 8000;
       };
       const bool realBusy = result == ERROR_SUCCESS && busy(r);
-      if ((realBusy || (active && busy(pad))) && GetTickCount64() - lastLog > 300) {
+      if (realBusy) g_realPadBusyAt = GetTickCount64();
+      const WORD buttons = WORD((result == ERROR_SUCCESS ? r.wButtons : 0) | (active ? pad.wButtons : 0));
+      const ULONGLONG since = GetTickCount64() - lastLog;
+      if ((realBusy || (active && busy(pad))) && (since > 10000 || (buttons != lastButtons && since > 300))) {
         lastLog = GetTickCount64();
+        lastButtons = buttons;
         Log("pad: real(%s) btn %04X L %6d %6d R %6d %6d T %3d %3d | vr(%s) btn %04X L %6d %6d R %6d %6d T %3d %3d",
             result == ERROR_SUCCESS ? "on" : "off", r.wButtons, r.sThumbLX, r.sThumbLY, r.sThumbRX, r.sThumbRY,
             r.bLeftTrigger, r.bRightTrigger, active ? "on" : "off", pad.wButtons, pad.sThumbLX, pad.sThumbLY,
@@ -436,20 +483,32 @@ bool InstallXInputHook() {
   return true;
 }
 
+double SecondsSinceRealPad() {
+  const unsigned long long at = g_realPadBusyAt.load();
+  return at ? (GetTickCount64() - at) / 1000.0 : 1e9;
+}
+
+void Vibrate(int hand, float amplitude, float seconds) {
+  hand &= 1;
+  std::lock_guard lock(g_hapticMutex);
+  g_hapticAmp[hand] = std::max(g_hapticAmp[hand], std::clamp(amplitude, 0.0f, 1.0f));
+  g_hapticSecs[hand] = std::max(g_hapticSecs[hand], seconds);
+}
+
 bool CreateActions(XrInstance instance, XrSession session) {
   XrActionSetCreateInfo si{XR_TYPE_ACTION_SET_CREATE_INFO};
   strcpy_s(si.actionSetName, "gameplay");
   strcpy_s(si.localizedActionSetName, "Gameplay");
   if (!Check(instance, xrCreateActionSet(instance, &si, &g_actionSet), "xrCreateActionSet")) return false;
 
+  g_handPaths[0] = ToPath(instance, "/user/hand/left");
+  g_handPaths[1] = ToPath(instance, "/user/hand/right");
   for (int i = 0; i < kActionCount; ++i) {
     XrActionCreateInfo ai{XR_TYPE_ACTION_CREATE_INFO};
     strcpy_s(ai.actionName, kActions[i].name);
     strcpy_s(ai.localizedActionName, kActions[i].localized);
     ai.actionType = kActions[i].type;
-    if (ai.actionType == XR_ACTION_TYPE_POSE_INPUT) {  // one pose per hand
-      g_handPaths[0] = ToPath(instance, "/user/hand/left");
-      g_handPaths[1] = ToPath(instance, "/user/hand/right");
+    if (ai.actionType == XR_ACTION_TYPE_POSE_INPUT || ai.actionType == XR_ACTION_TYPE_VIBRATION_OUTPUT) {  // per hand
       ai.countSubactionPaths = 2;
       ai.subactionPaths = g_handPaths;
     }
@@ -495,6 +554,7 @@ bool Sync(XrSession session, bool focused) {
     sync.countActiveActionSets = 1;
     sync.activeActionSets = &active;
     if (XR_SUCCEEDED(xrSyncActions(session, &sync))) {
+      ApplyHaptics(session);
       auto getBool = [&](ActionId id) {
         XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
         gi.action = g_actions[id];
@@ -605,6 +665,8 @@ void DestroyActions() {
   std::memset(g_actions, 0, sizeof(g_actions));
   std::lock_guard lock(g_padMutex);
   g_pad = {};
+  g_vrControls = {};
+  g_pointerMode = false;
   g_padActive = false;
   g_profiles = "none";
   g_handConnected[0] = g_handConnected[1] = false;

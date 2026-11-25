@@ -1,6 +1,7 @@
 #include "xr.h"
 
 #include <windows.h>
+#include <tlhelp32.h>
 #include <d3d11.h>
 #include <dxgi.h>
 #include <dxgi1_4.h>
@@ -23,6 +24,7 @@
 
 #include "audio.h"
 #include "d3dtrace.h"
+#include "haptics.h"
 #include "input.h"
 #include "overlay.h"
 #include "sky.h"
@@ -70,6 +72,19 @@ double g_nextInitAttempt = 0;
 std::string g_status = "not started";
 std::vector<int64_t> g_formats;
 
+// ---- SteamVR going away (closed or crashed) ------------------------------------------------------------
+// The game then plays flat on the monitor (nothing is rendered per eye without a running session) and VR
+// comes back by itself once SteamVR runs again. Starting the runtime would launch SteamVR, so after a loss
+// it isn't tried until SteamVR's own processes are back.
+bool g_runtimeSteamVR = false;            // the connected runtime is SteamVR (from Init)
+std::atomic<bool> g_xrLost{false};        // a call answered that the session or instance is lost
+std::atomic<bool> g_watchSteamVR{false};  // the watchdog thread should look for SteamVR's processes
+std::atomic<bool> g_steamVrUp{true};      // ...and found them (both, settled)
+std::atomic<bool> g_resetWatch{false};    // start the watchdog's counting over (after a loss)
+bool g_waitForRuntime = false;            // lost: don't start the runtime until SteamVR runs again
+double g_lostAt = -1e9, g_backAt = -1e9;  // for the notice on the monitor
+std::string g_lostWhy;
+
 Swapchain g_eyeChains[2];
 Swapchain g_screenChain;
 Swapchain g_hudChain;
@@ -116,8 +131,13 @@ XrPosef ToXr(const Pose& p) {
   return out;
 }
 
+bool IsLoss(XrResult r) {
+  return r == XR_ERROR_SESSION_LOST || r == XR_ERROR_INSTANCE_LOST || r == XR_ERROR_RUNTIME_UNAVAILABLE;
+}
+
 bool Check(XrResult r, const char* what) {
   if (XR_SUCCEEDED(r)) return true;
+  if (IsLoss(r) && g_instance) g_xrLost = true;
   char buf[XR_MAX_RESULT_STRING_SIZE] = "";
   if (g_instance) xrResultToString(g_instance, r, buf);
   g_status = std::string(what) + " failed: " + (buf[0] ? buf : std::to_string(int(r)));
@@ -151,6 +171,22 @@ void DestroyAll() {
   g_haveRef = false;
   g_state = XR_SESSION_STATE_UNKNOWN;
   g_formats.clear();
+  g_xrLost = false;
+}
+
+// SteamVR closed, crashed or stopped answering: everything goes (the controllers' virtual pad is released
+// with the actions, so no stick stays held) and the game carries on flat.
+void LoseRuntime(const char* why) {
+  Log("XR: %s; the game plays flat until it's back", why);
+  DestroyAll();
+  g_lostWhy = why;
+  g_lostAt = NowMs();
+  g_backAt = -1e9;
+  g_waitForRuntime = g_runtimeSteamVR;
+  g_steamVrUp = false;  // until the watchdog sees SteamVR running (and settled) again
+  g_resetWatch = true;
+  g_status = std::string(why) + "; flat until " + (g_runtimeSteamVR ? "SteamVR runs again" : "the runtime is back");
+  g_nextInitAttempt = NowMs() + 2 * kInitRetryMs;  // (SteamVR takes a few seconds to shut down)
 }
 
 bool Init() {
@@ -162,6 +198,9 @@ bool Init() {
   ci.enabledExtensionCount = 1;
   ci.enabledExtensionNames = extensions;
   if (!Check(xrCreateInstance(&ci, &g_instance), "xrCreateInstance")) return false;
+  XrInstanceProperties ip{XR_TYPE_INSTANCE_PROPERTIES};
+  if (XR_SUCCEEDED(xrGetInstanceProperties(g_instance, &ip)))
+    g_runtimeSteamVR = std::strstr(ip.runtimeName, "SteamVR") != nullptr;
 
   XrSystemGetInfo si{XR_TYPE_SYSTEM_GET_INFO};
   si.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
@@ -312,7 +351,8 @@ bool CaptureTexture(Swapchain& sc, ID3D11Texture2D* bb) {
 
 void PollEvents() {
   XrEventDataBuffer ev{XR_TYPE_EVENT_DATA_BUFFER};
-  while (xrPollEvent(g_instance, &ev) == XR_SUCCESS) {
+  XrResult r;
+  while ((r = xrPollEvent(g_instance, &ev)) == XR_SUCCESS) {
     if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
       const auto& e = *reinterpret_cast<XrEventDataSessionStateChanged*>(&ev);
       g_state = e.state;
@@ -328,9 +368,7 @@ void PollEvents() {
         xrEndSession(g_session);
         g_status = "stopped by runtime";
       } else if (g_state == XR_SESSION_STATE_EXITING || g_state == XR_SESSION_STATE_LOSS_PENDING) {
-        DestroyAll();
-        g_status = "session lost; will retry";
-        g_nextInitAttempt = NowMs() + kInitRetryMs;
+        LoseRuntime(g_state == XR_SESSION_STATE_EXITING ? "SteamVR closed the session" : "VR session lost");
         return;
       }
     } else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
@@ -339,13 +377,12 @@ void PollEvents() {
     } else if (ev.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED) {
       input::OnInteractionProfileChanged(g_instance, g_session);
     } else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
-      DestroyAll();
-      g_status = "runtime went away; will retry";
-      g_nextInitAttempt = NowMs() + kInitRetryMs;
+      LoseRuntime("the VR runtime is going away");
       return;
     }
     ev = {XR_TYPE_EVENT_DATA_BUFFER};
   }
+  if (IsLoss(r)) g_xrLost = true;
 }
 
 // HUD look for this frame: the dark backing behind HUD elements follows scene brightness.
@@ -676,6 +713,9 @@ bool SaveSettingsLocked() {
   put(L"hide_bar_in_menus", s.hideBarInMenus);
   put(L"controller_models", s.controllerModels);
   put(L"head_audio", s.headAudio);
+  put(L"haptics", s.haptics);
+  put(L"haptics_strength", s.hapticsStrength);
+  put(L"haptics_hits", s.hapticsHits);
   put(L"hand_menu_size", s.handMenuSize);
   put(L"hand_menu_max_width", s.handMenuMaxWidth);
   put(L"hand_menu_up", s.handMenuUp);
@@ -1145,7 +1185,9 @@ void BeginFrame() {
   XrViewState vs{XR_TYPE_VIEW_STATE};
   uint32_t n = 0;
   g_views[0] = g_views[1] = {XR_TYPE_VIEW};
-  g_viewsValid = XR_SUCCEEDED(xrLocateViews(g_session, &li, &vs, 2, &n, g_views)) && n == 2 &&
+  const XrResult located = xrLocateViews(g_session, &li, &vs, 2, &n, g_views);
+  if (IsLoss(located)) g_xrLost = true;
+  g_viewsValid = XR_SUCCEEDED(located) && n == 2 &&
                  (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) &&
                  (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT);
   if (g_viewsValid && g_haveRef)
@@ -1157,7 +1199,8 @@ void BeginFrame() {
   }
   WatchControllers();
 
-  // Controllers -> virtual gamepad (read by the game through XInputGetState).
+  // Controllers -> virtual gamepad (read by the game through XInputGetState); vibration goes out with it.
+  haptics::Update();
   if (input::Sync(g_session, g_state == XR_SESSION_STATE_FOCUSED)) g_recenterRequested = true;
 }
 
@@ -1238,6 +1281,8 @@ void OnPresent(IDXGISwapChain* swapChain) {
   f10Was = f10;
 
   if (g_settings.mode == Mode::Off) {
+    g_watchSteamVR = false;
+    g_waitForRuntime = false;
     if (g_instance) {
       if (g_frameBegun) EndFrame();
       DestroyAll();
@@ -1246,24 +1291,80 @@ void OnPresent(IDXGISwapChain* swapChain) {
     return;
   }
 
+  // SteamVR gone (its processes, seen by the watchdog thread) or a call said the session is lost: drop to
+  // flat before calling into it again (a call into a dead compositor could wait for good).
+  if (g_instance && g_runtimeSteamVR && !g_steamVrUp) LoseRuntime("SteamVR stopped running");
+  if (g_xrLost) LoseRuntime("the VR session was lost");
+  g_watchSteamVR = (g_instance && g_runtimeSteamVR) || g_waitForRuntime;
+
   if (!g_instance) {
     if (NowMs() < g_nextInitAttempt) return;
+    if (g_waitForRuntime && !g_steamVrUp) return;  // starting the runtime now would launch SteamVR again
     if (!Init()) {
       DestroyAll();
       g_nextInitAttempt = NowMs() + kInitRetryMs;
       return;
     }
+    g_steamVrUp = true;
+    if (g_lostAt > g_backAt) {
+      g_backAt = NowMs();
+      Log("XR: back after %.0f s flat", (g_backAt - g_lostAt) / 1000.0);
+    }
+    g_waitForRuntime = false;
   }
 
   PollEvents();
+  if (g_xrLost) LoseRuntime("the VR session was lost");
   if (!g_session || !g_running) return;
   if (g_frameBegun) EndFrame();
+  if (g_xrLost) {
+    LoseRuntime("the VR session was lost");
+    return;
+  }
   BeginFrame();
+}
+
+void WatchRuntime() {
+  static int seen = 0, missed = 0;
+  if (g_resetWatch.exchange(false) || !g_watchSteamVR) seen = missed = 0;
+  if (!g_watchSteamVR) return;
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return;
+  bool server = false, compositor = false;
+  PROCESSENTRY32W pe{sizeof(pe)};
+  for (BOOL more = Process32FirstW(snap, &pe); more; more = Process32NextW(snap, &pe)) {
+    if (_wcsicmp(pe.szExeFile, L"vrserver.exe") == 0) server = true;
+    if (_wcsicmp(pe.szExeFile, L"vrcompositor.exe") == 0) compositor = true;
+  }
+  CloseHandle(snap);
+  if (server && compositor) {
+    missed = 0;
+    if (++seen >= 3) g_steamVrUp = true;  // up for 3 s: settled (not one that is still shutting down)
+  } else {
+    seen = 0;
+    if (++missed >= 2) g_steamVrUp = false;  // (the compositor is restarted by SteamVR within a second)
+  }
+}
+
+bool FallbackNotice(std::string& text) {
+  std::lock_guard lock(g_mutex);
+  if (g_settings.mode == Mode::Off) return false;
+  const double now = NowMs();
+  if (!g_instance && g_lostAt > g_backAt && now - g_lostAt < 30000) {
+    text = g_lostWhy + ": playing flat. VR comes back by itself when " +
+           (g_runtimeSteamVR ? "SteamVR" : "the VR runtime") + " runs again (F9 turns VR off).";
+    return true;
+  }
+  if (now - g_backAt < 5000) {
+    text = "VR is back.";
+    return true;
+  }
+  return false;
 }
 
 bool StereoFrameActive() {
   std::lock_guard lock(g_mutex);
-  return g_running && g_frameBegun && (g_frameState.shouldRender || g_settings.bench) && g_viewsValid && g_haveRef &&
+  return g_running && g_frameBegun && !g_xrLost && (g_frameState.shouldRender || g_settings.bench) && g_viewsValid && g_haveRef &&
          g_settings.mode == Mode::Stereo;
 }
 
@@ -1762,6 +1863,7 @@ void DrawDebugUI(void (*diagnostics)()) {
     ImGui::SliderFloat("Window tilt up (deg)", &g_settings.handMenuTiltDeg, -30.0f, 90.0f, "%.0f");
     ImGui::SeparatorText("Controllers");
     controllers::DrawDebugUI();
+    haptics::DrawDebugUI();
     ImGui::EndTabItem();
   }
 

@@ -1,6 +1,8 @@
 #pragma once
 // OpenXR (SteamVR) output: session, frame loop, per-eye capture.
 
+#include <string>
+
 #include "mask.h"
 #include "vr_math.h"
 
@@ -47,6 +49,9 @@ struct Settings {
   float handMenuTiltDeg = 30.0f;  // 0 = facing you, 90 = facing up
   bool controllerModels = true;   // SteamVR's controller models drawn at the controllers
   bool headAudio = true;          // the game's sound listener turns with the head
+  bool haptics = true;            // controller vibration (hits taken, potions, your hits)
+  float hapticsStrength = 1.0f;   // ...scaled by this
+  bool hapticsHits = true;        // ...a tick on your own hits
   bool titleCutout = true;       // title screen: the character picture stands in the 3D scene
   bool mirror = true;            // the game window shows the left eye with the HUD (for recording/streaming)
   float mirrorFovDeg = 90.0f;    // ...cropped to this horizontal field of view
@@ -150,6 +155,13 @@ void OnPresent(IDXGISwapChain* swapChain);
 
 // True when this frame should be rendered once per eye.
 bool StereoFrameActive();
+
+// Once a second from the watchdog thread: whether SteamVR's processes are still running (when it is the
+// runtime, or VR waits for it after it went away). If not, the game drops to flat and VR comes back when
+// SteamVR runs again.
+void WatchRuntime();
+// A line for the monitor while VR has dropped to flat (or just came back); false when there is none.
+bool FallbackNotice(std::string& text);
 
 // Whether the world being rendered has a character in it (false on the title screen). From the renderer.
 void SetInWorld(bool inWorld);

@@ -885,6 +885,9 @@ void PollControlFile() {
   vr.hideBarInMenus = getInt(L"hide_bar_in_menus", vr.hideBarInMenus) != 0;
   vr.controllerModels = getInt(L"controller_models", vr.controllerModels) != 0;
   vr.headAudio = getInt(L"head_audio", vr.headAudio) != 0;
+  vr.haptics = getInt(L"haptics", vr.haptics) != 0;
+  vr.hapticsStrength = std::clamp(getFloat(L"haptics_strength", vr.hapticsStrength), 0.0f, 1.5f);
+  vr.hapticsHits = getInt(L"haptics_hits", vr.hapticsHits) != 0;
   vr.handMenuSize = getFloat(L"hand_menu_size", vr.handMenuSize);
   vr.handMenuMaxWidth = getFloat(L"hand_menu_max_width", vr.handMenuMaxWidth);
   vr.handMenuUp = getFloat(L"hand_menu_up", vr.handMenuUp);
@@ -1012,12 +1015,16 @@ void OnFramePresented() {
     frame = g_published;
   }
 
-  // Once a second, write the main camera to the log so results can be read without the UI.
-  static double lastLog = 0;
+  // Once a second, read the control file; write the main camera to the log (players' logs: every 30 s).
+  static double lastPoll = 0, lastLog = 0;
   const double now = NowMs();
-  if (now - lastLog < 1000.0 || frame.count == 0) return;
-  lastLog = now;
+  if (now - lastPoll < 1000.0 || frame.count == 0) return;
+  lastPoll = now;
   PollControlFile();
+#ifndef GDVR_DEV_LOG_DIR
+  if (now - lastLog < 30000.0) return;
+#endif
+  lastLog = now;
   const RenderCall& c = frame.calls[0];
   const float* f = c.coords;
   Log("calls=%d vp=%dx%d fov=%.4f near=%.2f far=%.2f render=%.2fms dup=%.2fms | offset=%d idx=%d call=%d (%.2f %.2f %.2f) twice=%d",

@@ -94,6 +94,11 @@ double HookNowMs() {
   return double(t.QuadPart) * 1000.0 / double(freq.QuadPart);
 }
 bool Forced(int k, double now) { return now < g_forceUntil[k].load(); }
+bool LiveNow();  // below
+// The mod drives the game's mouse and keys only while its pointer is updated (stereo frames). When VR
+// stops (SteamVR closed, flat fallback, F9) the last laser state must not linger: the real mouse and
+// keyboard take over at once.
+bool Driving() { return g_active.load() && LiveNow(); }
 bool AnyForced(double now) {
   for (int k = 0; k < 256; ++k)
     if (Forced(k, now)) return true;
@@ -153,7 +158,7 @@ BOOL WINAPI HookGetCursorPos(LPPOINT point) {
   bool fed = false;
   HMODULE caller;
   const bool fromGame = FromGame(_ReturnAddress(), caller);
-  if (point && g_active && g_feeding && fromGame) {
+  if (point && Driving() && g_feeding && fromGame) {
     if (HWND window = overlay::GameWindow()) {
       POINT p{g_feedX.load(), g_feedY.load()};
       if (ClientToScreen(window, &p)) {
@@ -173,7 +178,8 @@ HRESULT OnDeviceState(void* self, DWORD size, void* data, HRESULT hr, void* retu
   if (!data || !(keyboard || mouse) || !FromGameInput(returnAddress)) return hr;
   if (!g_keyboardChecked) (keyboard ? g_keyboardDevice : g_mouseDevice) = self;
   const double now = HookNowMs();
-  if (!g_active && !(keyboard && AnyForced(now))) return hr;
+  const bool driving = Driving();
+  if (!driving && !(keyboard && AnyForced(now))) return hr;
   if (FAILED(hr)) {
     std::memset(data, 0, size);
     hr = DI_OK;
@@ -182,13 +188,15 @@ HRESULT OnDeviceState(void* self, DWORD size, void* data, HRESULT hr, void* retu
   if (keyboard) {
     auto* keys = static_cast<BYTE*>(data);
     for (int k = 0; k < 256; ++k)
-      if ((g_active && g_out.keys[k]) || Forced(k, now)) keys[k] = 0x80;
+      if ((driving && g_out.keys[k]) || Forced(k, now)) keys[k] = 0x80;
   } else {
     auto* m = static_cast<DIMOUSESTATE*>(data);
-    m->lX += g_motionX.exchange(0);
-    m->lY += g_motionY.exchange(0);
-    for (int b = 0; b < 2; ++b)
-      if (g_out.buttons[b]) m->rgbButtons[b] = 0x80;
+    if (driving) {
+      m->lX += g_motionX.exchange(0);
+      m->lY += g_motionY.exchange(0);
+      for (int b = 0; b < 2; ++b)
+        if (g_out.buttons[b]) m->rgbButtons[b] = 0x80;
+    }
   }
   return hr;
 }
@@ -198,7 +206,15 @@ HRESULT OnDeviceData(void* self, DWORD objectSize, DIDEVICEOBJECTDATA* data, DWO
   const bool keyboard = self == g_keyboardDevice.load(), mouse = self == g_mouseDevice.load();
   const double now = HookNowMs();
   const bool forcing = keyboard && AnyForced(now);
-  if (!(g_active || forcing) || !(keyboard || mouse) || !data || !count || objectSize != sizeof(DIDEVICEOBJECTDATA) ||
+  const bool driving = Driving();
+  // Presses already sent still get their releases after the mod stops driving (no stuck keys or buttons).
+  bool releasing = false;
+  {
+    std::lock_guard lock(g_outMutex);
+    for (int k = 0; k < 256 && !releasing; ++k) releasing = g_keysSent[k];
+    releasing = releasing || g_buttonsSent[0] || g_buttonsSent[1];
+  }
+  if (!(driving || forcing || releasing) || !(keyboard || mouse) || !data || !count || objectSize != sizeof(DIDEVICEOBJECTDATA) ||
       (flags & DIGDD_PEEK) || !FromGameInput(returnAddress))
     return hr;
   DWORD n = SUCCEEDED(hr) ? *count : 0;
@@ -217,13 +233,14 @@ HRESULT OnDeviceData(void* self, DWORD objectSize, DIDEVICEOBJECTDATA* data, DWO
   std::lock_guard lock(g_outMutex);
   if (keyboard) {
     for (int k = 0; k < 256; ++k) {
-      const bool want = (g_active && g_out.keys[k]) || Forced(k, now);
+      const bool want = (driving && g_out.keys[k]) || Forced(k, now);
       if (want != g_keysSent[k] && add(DWORD(k), want)) g_keysSent[k] = want;
     }
   } else {
-    for (int b = 0; b < 2; ++b)
-      if (g_out.buttons[b] != g_buttonsSent[b] && add(DWORD(DIMOFS_BUTTON0 + b), g_out.buttons[b]))
-        g_buttonsSent[b] = g_out.buttons[b];
+    for (int b = 0; b < 2; ++b) {
+      const bool want = driving && g_out.buttons[b];
+      if (want != g_buttonsSent[b] && add(DWORD(DIMOFS_BUTTON0 + b), want)) g_buttonsSent[b] = want;
+    }
   }
   *count = n;
   return hr;
